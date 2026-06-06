@@ -19,7 +19,7 @@ from torch import Tensor, nn
 from materials_gnn.featurization.basis import ScalarBasisExpansion, make_basis_expansion
 from materials_gnn.featurization.elemental_features import AtomFeatureEncoder
 from materials_gnn.models.layers import GatedGraphConv
-from materials_gnn.models.readout import MLPReadout, pool_nodes
+from materials_gnn.models.readout import make_readout, pool_nodes
 
 
 class CGCNNModel(nn.Module):
@@ -56,6 +56,12 @@ class CGCNNModel(nn.Module):
         distance_basis_start: float = 0.0,
         distance_basis_cutoff: float = 5.0,
         distance_basis_kwargs: Mapping[str, Any] | None = None,
+        readout_type: str = "mlp",
+        ib_lambda: float = 0.01,
+        ib_sigma_slope: float = 1.0,
+        ib_fixed_point_iters: int = 8,
+        ib_coupling: str = "ring",
+        ib_trainable_lambda: bool = False,
     ) -> None:
         super().__init__()
         self.pooling = pooling
@@ -80,7 +86,20 @@ class CGCNNModel(nn.Module):
         self.convs = nn.ModuleList(
             [GatedGraphConv(hidden_dim, hidden_dim, dropout=dropout) for _ in range(num_layers)]
         )
-        self.readout = MLPReadout(hidden_dim, output_dim, hidden_dim=hidden_dim, dropout=dropout)
+        self.readout = make_readout(
+            readout_type,
+            hidden_dim,
+            output_dim,
+            hidden_dim=hidden_dim,
+            dropout=dropout,
+            ib_kwargs={
+                "ib_lambda": ib_lambda,
+                "sigma_slope": ib_sigma_slope,
+                "fixed_point_iters": ib_fixed_point_iters,
+                "coupling": ib_coupling,
+                "trainable_lambda": ib_trainable_lambda,
+            },
+        )
 
     def _edge_features(self, graph: Mapping[str, Tensor | int], *, device: torch.device, dtype: torch.dtype) -> Tensor:
         if self.distance_basis is None:

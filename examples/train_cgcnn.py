@@ -38,6 +38,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--distance-basis", choices=["gaussian", "bessel", "fourier"], default="gaussian", help="Static preprocessing basis for bond distances")
     parser.add_argument("--learnable-distance-basis", action="store_true", help="Use a trainable Gaussian distance basis inside the model")
     parser.add_argument("--atom-features", default="", help="Comma-separated elemental descriptors or 'default'")
+    parser.add_argument("--readout-type", choices=["mlp", "implicit_bias"], default="mlp")
+    parser.add_argument("--ib-lambda", type=float, default=0.01)
+    parser.add_argument("--ib-sigma-slope", type=float, default=1.0)
+    parser.add_argument("--ib-fixed-point-iters", type=int, default=8)
+    parser.add_argument("--ib-coupling", choices=["ring", "dense"], default="ring")
+    parser.add_argument("--ib-trainable-lambda", action="store_true")
     parser.add_argument("--hidden-dim", type=int, default=128)
     parser.add_argument("--num-layers", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=16)
@@ -112,6 +118,12 @@ def _model_config_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "atom_feature_names": args.atom_features or None,
         "distance_basis_type": "learnable_gaussian" if args.learnable_distance_basis else None,
         "distance_basis_cutoff": _rbf_cutoff_from_args(args) or args.cutoff,
+        "readout_type": args.readout_type,
+        "ib_lambda": args.ib_lambda,
+        "ib_sigma_slope": args.ib_sigma_slope,
+        "ib_fixed_point_iters": args.ib_fixed_point_iters,
+        "ib_coupling": args.ib_coupling,
+        "ib_trainable_lambda": args.ib_trainable_lambda,
     }
 
 

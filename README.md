@@ -377,6 +377,47 @@ python examples/train_cgcnn.py \
   --cutoff 5.0
 ```
 
+## Implicit-bias readout experiment
+
+The first implicit-bias experiment leaves graph construction and message passing unchanged
+and only swaps the hidden activation in the final post-pooling readout head.
+
+Baseline CGCNN:
+
+```bash
+python examples/train_cgcnn.py --csv data/id_prop.csv --target target --output-dir runs/cgcnn_baseline
+```
+
+Implicit-bias readout CGCNN:
+
+```bash
+python examples/train_cgcnn.py --csv data/id_prop.csv --target target \
+  --readout-type implicit_bias \
+  --ib-lambda 0.01 \
+  --ib-sigma-slope 1.0 \
+  --ib-fixed-point-iters 8 \
+  --ib-coupling ring \
+  --output-dir runs/cgcnn_ib_readout_lam001
+```
+
+Baseline ALIGNN-like:
+
+```bash
+python examples/train_alignn_like.py --csv data/id_prop.csv --target target --output-dir runs/alignn_baseline
+```
+
+Implicit-bias readout ALIGNN-like:
+
+```bash
+python examples/train_alignn_like.py --csv data/id_prop.csv --target target \
+  --readout-type implicit_bias \
+  --ib-lambda 0.01 \
+  --ib-sigma-slope 1.0 \
+  --ib-fixed-point-iters 8 \
+  --ib-coupling ring \
+  --output-dir runs/alignn_ib_readout_lam001
+```
+
 ## Predict from a CIF
 
 Training writes `experiment_config.json`, `training_history.json`, `best_model.pt`, and

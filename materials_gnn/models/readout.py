@@ -10,6 +10,7 @@ from __future__ import annotations
 import torch
 from torch import Tensor, nn
 
+from materials_gnn.models.implicit_bias import ImplicitBiasMLPReadout
 from materials_gnn.models.layers import build_mlp
 
 
@@ -77,3 +78,27 @@ class MLPReadout(nn.Module):
 
     def forward(self, crystal_embedding: Tensor) -> Tensor:
         return self.net(crystal_embedding)
+
+
+def make_readout(
+    readout_type: str,
+    input_dim: int,
+    output_dim: int,
+    *,
+    hidden_dim: int | None = None,
+    dropout: float = 0.0,
+    ib_kwargs: dict[str, object] | None = None,
+) -> nn.Module:
+    """Build a crystal-level readout head."""
+
+    if readout_type == "mlp":
+        return MLPReadout(input_dim, output_dim, hidden_dim=hidden_dim, dropout=dropout)
+    if readout_type == "implicit_bias":
+        return ImplicitBiasMLPReadout(
+            input_dim,
+            output_dim,
+            hidden_dim=hidden_dim,
+            dropout=dropout,
+            **dict(ib_kwargs or {}),
+        )
+    raise ValueError(f"Unsupported readout_type: {readout_type!r}")

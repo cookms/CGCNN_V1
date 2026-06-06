@@ -1,0 +1,32 @@
+# Python bytecode and local test caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Packaging/build outputs
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local graph/data caches and generated research artifacts
+cache/
+runs/
+materials_gnn/data/cifs_all/
+id_prop_all_frwd.csv
+
+# Model checkpoints and tensor cache files
+*.pt
+*.pth
+
+# Logs and local environment files
+*.log
+.env
+.env.*

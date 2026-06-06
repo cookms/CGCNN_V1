@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 
 from materials_gnn.featurization.line_graph import build_line_graph
-from materials_gnn.models import ALIGNNLikeModel, CGCNNModel, GatedGraphConv
+from materials_gnn.models import ALIGNNLikeModel, CGCNNModel, GatedGraphConv, ImplicitBiasActivation
 
 
 def toy_graph(num_rbf: int = 16, num_angle_rbf: int = 8) -> dict[str, torch.Tensor | int]:
@@ -101,6 +101,77 @@ def test_alignn_forward_with_model_level_distance_and_angle_bases() -> None:
         distance_basis_type="learnable_gaussian",
         distance_basis_cutoff=3.0,
         angle_basis_type="learnable_gaussian",
+    )
+
+    out = model(graph)
+
+    assert out.shape == (1,)
+    assert torch.isfinite(out).all()
+
+
+def test_implicit_bias_activation_preserves_shape_and_is_finite() -> None:
+    activation = ImplicitBiasActivation(dim=5, ib_lambda=0.01, fixed_point_iters=3)
+    y = torch.randn(2, 3, 5)
+
+    out = activation(y)
+
+    assert out.shape == y.shape
+    assert torch.isfinite(out).all()
+
+
+def test_implicit_bias_activation_gradients_flow() -> None:
+    activation = ImplicitBiasActivation(
+        dim=4,
+        ib_lambda=0.01,
+        fixed_point_iters=3,
+        coupling="dense",
+        trainable_lambda=True,
+    )
+    y = torch.randn(2, 4, requires_grad=True)
+
+    loss = activation(y).sum()
+    loss.backward()
+
+    assert y.grad is not None
+    assert torch.isfinite(y.grad).all()
+    assert activation.ib_lambda.grad is not None
+    assert torch.isfinite(activation.ib_lambda.grad).all()
+
+
+def test_implicit_bias_activation_zero_lambda_matches_silu() -> None:
+    activation = ImplicitBiasActivation(dim=6, ib_lambda=0.0, fixed_point_iters=3)
+    y = torch.randn(4, 6)
+
+    out = activation(y)
+
+    assert torch.allclose(out, torch.nn.functional.silu(y), atol=1e-7, rtol=1e-7)
+
+
+def test_cgcnn_forward_with_implicit_bias_readout() -> None:
+    graph = toy_graph()
+    model = CGCNNModel(
+        edge_input_dim=16,
+        hidden_dim=32,
+        num_layers=2,
+        readout_type="implicit_bias",
+        ib_fixed_point_iters=3,
+    )
+
+    out = model(graph)
+
+    assert out.shape == (1,)
+    assert torch.isfinite(out).all()
+
+
+def test_alignn_like_forward_with_implicit_bias_readout() -> None:
+    graph = toy_graph()
+    model = ALIGNNLikeModel(
+        edge_input_dim=16,
+        angle_input_dim=8,
+        hidden_dim=32,
+        num_layers=2,
+        readout_type="implicit_bias",
+        ib_fixed_point_iters=3,
     )
 
     out = model(graph)
