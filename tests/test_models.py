@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import torch
 
 from materials_gnn.featurization.line_graph import build_line_graph
@@ -53,6 +54,77 @@ def test_gated_graph_conv_shapes() -> None:
     assert e_out.shape == edge_attr.shape
 
 
+def test_gated_graph_conv_accepts_1d_edge_weight() -> None:
+    conv = GatedGraphConv(node_dim=12, edge_dim=6)
+    x = torch.randn(4, 12)
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    edge_attr = torch.randn(3, 6)
+    edge_weight = torch.tensor([0.5, 1.0, 1.5])
+
+    x_out, e_out = conv(x, edge_index, edge_attr, edge_weight=edge_weight)
+
+    assert x_out.shape == x.shape
+    assert e_out.shape == edge_attr.shape
+
+
+def test_gated_graph_conv_accepts_column_edge_weight() -> None:
+    conv = GatedGraphConv(node_dim=12, edge_dim=6)
+    x = torch.randn(4, 12)
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    edge_attr = torch.randn(3, 6)
+    edge_weight = torch.tensor([[0.5], [1.0], [1.5]])
+
+    x_out, e_out = conv(x, edge_index, edge_attr, edge_weight=edge_weight)
+
+    assert x_out.shape == x.shape
+    assert e_out.shape == edge_attr.shape
+
+
+def test_gated_graph_conv_rejects_mismatched_edge_weight_length() -> None:
+    conv = GatedGraphConv(node_dim=12, edge_dim=6)
+    x = torch.randn(4, 12)
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    edge_attr = torch.randn(3, 6)
+    edge_weight = torch.ones(2)
+
+    with pytest.raises(ValueError, match="edge_weight length must match num_edges"):
+        conv(x, edge_index, edge_attr, edge_weight=edge_weight)
+
+
+def test_gated_graph_conv_ones_edge_weight_matches_unweighted() -> None:
+    torch.manual_seed(7)
+    conv = GatedGraphConv(node_dim=12, edge_dim=6)
+    conv.eval()
+    x = torch.randn(4, 12)
+    edge_index = torch.tensor([[0, 1, 2, 3], [2, 2, 3, 0]], dtype=torch.long)
+    edge_attr = torch.randn(4, 6)
+
+    x_unweighted, e_unweighted = conv(x, edge_index, edge_attr)
+    x_weighted, e_weighted = conv(x, edge_index, edge_attr, edge_weight=torch.ones(4))
+
+    assert torch.allclose(x_weighted, x_unweighted, atol=1e-6, rtol=1e-6)
+    assert torch.allclose(e_weighted, e_unweighted, atol=1e-6, rtol=1e-6)
+
+
+def test_gated_graph_conv_nonuniform_edge_weight_changes_output() -> None:
+    torch.manual_seed(8)
+    conv = GatedGraphConv(node_dim=12, edge_dim=6)
+    conv.eval()
+    x = torch.randn(4, 12)
+    edge_index = torch.tensor([[0, 1, 2, 3], [2, 2, 3, 0]], dtype=torch.long)
+    edge_attr = torch.randn(4, 6)
+
+    x_unweighted, _ = conv(x, edge_index, edge_attr)
+    x_weighted, _ = conv(
+        x,
+        edge_index,
+        edge_attr,
+        edge_weight=torch.tensor([0.1, 2.0, 1.0, 1.0]),
+    )
+
+    assert not torch.allclose(x_weighted, x_unweighted, atol=1e-6, rtol=1e-6)
+
+
 def test_cgcnn_forward_shape() -> None:
     graph = toy_graph()
     model = CGCNNModel(edge_input_dim=16, hidden_dim=32, num_layers=2)
@@ -63,9 +135,72 @@ def test_cgcnn_forward_shape() -> None:
     assert torch.isfinite(out).all()
 
 
+def test_cgcnn_ignores_edge_weight_when_disabled() -> None:
+    torch.manual_seed(10)
+    graph = toy_graph()
+    graph["edge_weight"] = torch.ones(6)
+    model = CGCNNModel(edge_input_dim=16, hidden_dim=32, num_layers=2, use_edge_weight=False)
+    model.eval()
+
+    out_ones = model(graph)
+    graph["edge_weight"] = torch.tensor([0.1, 2.0, 0.5, 3.0, 1.0, 0.25])
+    out_nonuniform = model(graph)
+
+    assert torch.allclose(out_nonuniform, out_ones, atol=1e-6, rtol=1e-6)
+
+
+def test_cgcnn_uses_edge_weight_when_enabled() -> None:
+    torch.manual_seed(11)
+    graph = toy_graph()
+    graph["edge_weight"] = torch.ones(6)
+    model = CGCNNModel(edge_input_dim=16, hidden_dim=32, num_layers=2, use_edge_weight=True)
+    model.eval()
+
+    out_ones = model(graph)
+    graph["edge_weight"] = torch.tensor([0.1, 2.0, 0.5, 3.0, 1.0, 0.25])
+    out_nonuniform = model(graph)
+
+    assert not torch.allclose(out_nonuniform, out_ones, atol=1e-6, rtol=1e-6)
+
+
 def test_alignn_like_forward_shape() -> None:
     graph = toy_graph()
     model = ALIGNNLikeModel(edge_input_dim=16, angle_input_dim=8, hidden_dim=32, num_layers=2)
+
+    out = model(graph)
+
+    assert out.shape == (1,)
+    assert torch.isfinite(out).all()
+
+
+def test_alignn_like_runs_with_atom_edge_weight() -> None:
+    graph = toy_graph()
+    graph["edge_weight"] = torch.tensor([0.1, 2.0, 0.5, 3.0, 1.0, 0.25])
+    model = ALIGNNLikeModel(
+        edge_input_dim=16,
+        angle_input_dim=8,
+        hidden_dim=32,
+        num_layers=2,
+        use_edge_weight=True,
+    )
+
+    out = model(graph)
+
+    assert out.shape == (1,)
+    assert torch.isfinite(out).all()
+
+
+def test_alignn_like_edge_weight_does_not_require_line_edge_weight() -> None:
+    graph = toy_graph()
+    graph["edge_weight"] = torch.ones(6)
+    graph.pop("line_edge_weight", None)
+    model = ALIGNNLikeModel(
+        edge_input_dim=16,
+        angle_input_dim=8,
+        hidden_dim=32,
+        num_layers=2,
+        use_edge_weight=True,
+    )
 
     out = model(graph)
 

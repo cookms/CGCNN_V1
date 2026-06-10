@@ -55,9 +55,11 @@ class ALIGNNLikeModel(nn.Module):
         ib_fixed_point_iters: int = 8,
         ib_coupling: str = "ring",
         ib_trainable_lambda: bool = False,
+        use_edge_weight: bool = False,
     ) -> None:
         super().__init__()
         self.pooling = pooling
+        self.use_edge_weight = use_edge_weight
         self.angle_basis_use_cosine = angle_basis_use_cosine
         self.atom_embedding = AtomFeatureEncoder(
             hidden_dim,
@@ -161,12 +163,13 @@ class ALIGNNLikeModel(nn.Module):
         e = self.bond_embedding(self._edge_features(graph, device=device, dtype=dtype))
         t = self.angle_embedding(self._angle_features(graph, device=device, dtype=dtype))
         batch_tensor = batch.to(device=device) if isinstance(batch, Tensor) else None
+        edge_weight = graph.get("edge_weight") if self.use_edge_weight else None
 
         for line_conv, bond_conv in zip(self.line_convs, self.bond_convs, strict=True):
             # Bonds are nodes in the line graph; angles are line-graph edges.
             e, t = line_conv(e, line_edge_index, t)
             # Updated bonds then mediate atom-graph message passing.
-            h, e = bond_conv(h, edge_index, e)
+            h, e = bond_conv(h, edge_index, e, edge_weight=edge_weight)  # type: ignore[arg-type]
 
         crystal_embedding = pool_nodes(h, batch_tensor, mode=self.pooling)
         prediction = self.readout(crystal_embedding)

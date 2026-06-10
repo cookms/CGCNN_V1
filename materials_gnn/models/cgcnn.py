@@ -62,9 +62,11 @@ class CGCNNModel(nn.Module):
         ib_fixed_point_iters: int = 8,
         ib_coupling: str = "ring",
         ib_trainable_lambda: bool = False,
+        use_edge_weight: bool = False,
     ) -> None:
         super().__init__()
         self.pooling = pooling
+        self.use_edge_weight = use_edge_weight
         self.atom_embedding = AtomFeatureEncoder(
             hidden_dim,
             max_atomic_number=max_atomic_number,
@@ -127,9 +129,10 @@ class CGCNNModel(nn.Module):
         e = self.bond_embedding(self._edge_features(graph, device=h.device, dtype=h.dtype))
         edge_index = edge_index.to(device=h.device)
         batch_tensor = batch.to(device=h.device) if isinstance(batch, Tensor) else None
+        edge_weight = graph.get("edge_weight") if self.use_edge_weight else None
 
         for conv in self.convs:
-            h, e = conv(h, edge_index, e)
+            h, e = conv(h, edge_index, e, edge_weight=edge_weight)  # type: ignore[arg-type]
 
         crystal_embedding = pool_nodes(h, batch_tensor, mode=self.pooling)
         prediction = self.readout(crystal_embedding)

@@ -42,6 +42,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-rbf", type=int, default=64, help="Distance basis size")
     parser.add_argument("--distance-basis", choices=["gaussian", "bessel", "fourier"], default="gaussian", help="Static preprocessing basis for bond distances")
     parser.add_argument("--learnable-distance-basis", action="store_true", help="Use a trainable Gaussian distance basis inside the model")
+    parser.add_argument(
+        "--use-edge-weight",
+        action="store_true",
+        help="Use optional graph['edge_weight'] scalars to weight atom-graph message aggregation.",
+    )
     parser.add_argument("--atom-features", default="", help="Comma-separated elemental descriptors or 'default'")
     parser.add_argument("--num-angle-rbf", type=int, default=32, help="Angle basis size")
     parser.add_argument("--angle-basis", choices=["gaussian", "bessel", "fourier"], default="gaussian", help="Static preprocessing basis for bond angles")
@@ -157,6 +162,7 @@ def _model_config_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "atom_feature_names": args.atom_features or None,
         "distance_basis_type": "learnable_gaussian" if args.learnable_distance_basis else None,
         "distance_basis_cutoff": _rbf_cutoff_from_args(args) or args.cutoff,
+        "use_edge_weight": args.use_edge_weight,
         "angle_basis_type": "learnable_gaussian" if args.learnable_angle_basis else None,
         "angle_basis_use_cosine": args.angle_basis_use_cosine,
         "readout_type": args.readout_type,

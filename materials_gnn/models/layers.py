@@ -87,13 +87,22 @@ class GatedGraphConv(nn.Module):
         self.node_norm = nn.LayerNorm(node_dim)
         self.edge_norm = nn.LayerNorm(edge_dim)
 
-    def forward(self, x: Tensor, edge_index: Tensor, edge_attr: Tensor) -> tuple[Tensor, Tensor]:
+    def forward(
+        self,
+        x: Tensor,
+        edge_index: Tensor,
+        edge_attr: Tensor,
+        edge_weight: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
         """Apply one message-passing step.
 
         Args:
             x: Node features ``[num_nodes, node_dim]``.
             edge_index: Directed edges ``[2, num_edges]``.
             edge_attr: Edge features ``[num_edges, edge_dim]``.
+            edge_weight: Optional scalar weights ``[num_edges]`` or ``[num_edges, 1]``
+                applied to aggregation gates. Graph builders are responsible for
+                producing meaningful weights.
 
         Returns:
             Updated ``(x, edge_attr)``.
@@ -110,6 +119,27 @@ class GatedGraphConv(nn.Module):
 
         num_nodes = x.shape[0]
         num_edges = edge_index.shape[1]
+        use_edge_weight = edge_weight is not None
+        if use_edge_weight:
+            if not isinstance(edge_weight, Tensor):
+                raise TypeError("edge_weight must be a tensor when provided")
+            if edge_weight.ndim == 1:
+                if edge_weight.shape[0] != num_edges:
+                    raise ValueError(
+                        "edge_weight length must match num_edges; "
+                        f"got {edge_weight.shape[0]} and {num_edges}"
+                    )
+            elif edge_weight.ndim == 2:
+                if edge_weight.shape != (num_edges, 1):
+                    raise ValueError(
+                        "edge_weight must have shape [num_edges] or [num_edges, 1]; "
+                        f"got {tuple(edge_weight.shape)} for num_edges={num_edges}"
+                    )
+            else:
+                raise ValueError(
+                    "edge_weight must have shape [num_edges] or [num_edges, 1]; "
+                    f"got {tuple(edge_weight.shape)}"
+                )
 
         if num_edges == 0:
             # A graph can be edge-less with a tiny cutoff or malformed input. We still pass
@@ -130,7 +160,15 @@ class GatedGraphConv(nn.Module):
         messages = self.message_mlp(message_input)
         gates = self.gate_mlp(edge_new)
 
-        weighted_messages = gates * messages
+        if edge_weight is None:
+            effective_gates = gates
+        else:
+            edge_weight = edge_weight.to(device=gates.device, dtype=gates.dtype)
+            if edge_weight.ndim == 1:
+                edge_weight = edge_weight.unsqueeze(-1)
+            effective_gates = gates * edge_weight
+
+        weighted_messages = effective_gates * messages
 
         # Accumulate in float32 for numerical stability under AMP.
         # This is especially important for ALIGNN-like line graphs, where many
@@ -147,9 +185,16 @@ class GatedGraphConv(nn.Module):
         )
 
         aggregate_fp32.index_add_(0, dst, weighted_messages.float())
-        gate_sum_fp32.index_add_(0, dst, gates.float())
+        gate_sum_fp32.index_add_(0, dst, effective_gates.float())
 
-        aggregate = aggregate_fp32 / gate_sum_fp32.clamp_min(1e-4)
+        if use_edge_weight:
+            aggregate = torch.zeros_like(aggregate_fp32)
+            nonzero_gate_sum = gate_sum_fp32 != 0
+            aggregate[nonzero_gate_sum] = (
+                aggregate_fp32[nonzero_gate_sum] / gate_sum_fp32[nonzero_gate_sum]
+            )
+        else:
+            aggregate = aggregate_fp32 / gate_sum_fp32.clamp_min(1e-4)
         aggregate = aggregate.to(dtype=x.dtype)
 
         node_delta = self.node_mlp(torch.cat([x, aggregate], dim=-1))

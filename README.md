@@ -12,6 +12,7 @@ This is a first prototype, not a performance-optimized benchmark implementation.
 - Optionally add normalized elemental descriptors such as electronegativity, group, period, covalent radius, valence electrons, electron affinity, polarizability, magnetic moment, and ionization energy when pymatgen provides the data.
 - Build an ALIGNN-style line graph where directed bonds become nodes and line-graph edges encode bond angles with configurable bases and optional memory caps.
 - Train raw PyTorch CGCNN-style and ALIGNN-like models for scalar regression.
+- Optionally use atom-graph `edge_weight` scalars from weighted graph builders during message aggregation.
 - Use `device=auto`, CUDA batch transfer, optional CUDA mixed precision, and DataLoader pinned memory.
 - Reuse expensive CIF-to-graph preprocessing with RAM, persistent disk graph caching, or an explicit cache-precompute CLI.
 - Use CSV datasets with columns such as `material_id,cif_path,target`.
@@ -115,6 +116,29 @@ graph = structure_to_bond_graph(
 ```
 
 Custom strategies can implement `build(structure) -> NeighborList` and be passed directly as `neighbor_strategy=my_strategy`. This is the intended path for new graph construction research.
+
+### Optional atom-graph edge weights
+
+Some graph builders, including Voronoi and strain-consensus strategies, may attach an
+optional `edge_weight` tensor to the atom/bond graph. By default the models ignore this
+field, preserving the original unweighted aggregation behavior. To use those weights in
+atom-graph message aggregation, opt in with `use_edge_weight=True`:
+
+```python
+from materials_gnn.models import CGCNNModel
+
+model = CGCNNModel(
+    edge_input_dim=64,
+    hidden_dim=128,
+    use_edge_weight=True,
+)
+```
+
+The same flag is available on `ALIGNNLikeModel`, where it affects only atom/bond graph
+updates. Line-graph edge weighting is not implemented. If `use_edge_weight=True` but a
+graph has no `edge_weight`, the model falls back to the original unweighted aggregation.
+Graph builders are responsible for producing meaningful weights; the model does not
+normalize or clamp user-provided values.
 
 ## Atom, bond, and angle featurization
 
@@ -368,6 +392,17 @@ python examples/train_alignn_like.py \
   --atom-features default
 ```
 
+Use optional atom-graph edge weights from strategies that emit them:
+
+```bash
+python examples/train_alignn_like.py \
+  --csv data/id_prop.csv \
+  --target target \
+  --neighbor-strategy voronoi \
+  --neighbor-max-radius 10.0 \
+  --use-edge-weight
+```
+
 ## Train a CGCNN-style model
 
 ```bash
@@ -376,6 +411,9 @@ python examples/train_cgcnn.py \
   --target target \
   --cutoff 5.0
 ```
+
+For CGCNN-style runs, the same `--use-edge-weight` flag enables weighted atom-graph
+aggregation when the graph contains `edge_weight`.
 
 ## Implicit-bias readout experiment
 
@@ -424,6 +462,9 @@ Training writes `experiment_config.json`, `training_history.json`, `best_model.p
 `final_model.pt` into the run directory. The JSON config and checkpoint metadata include
 the package version, target column, split seed and indices, model architecture, graph
 strategy, featurization settings, target normalizer, and training CLI arguments.
+Each training-history epoch also records timing fields such as `train_seconds`,
+`val_seconds`, `epoch_seconds`, `elapsed_seconds`, and train throughput estimates, so
+architectural changes can be compared on speed as well as metrics.
 
 The checkpoints also retain top-level inference metadata, so prediction can reconstruct
 the model architecture plus CIF-to-graph settings such as cutoff, neighbor strategy,
@@ -463,6 +504,9 @@ Strategies such as Voronoi or adaptive shells may also attach:
     "edge_weight": geometric_edge_weights,  # [num_edges]
 }
 ```
+
+`edge_weight` is optional. `CGCNNModel` and `ALIGNNLikeModel` consume it only when
+constructed with `use_edge_weight=True` or trained with `--use-edge-weight`.
 
 An ALIGNN-like graph additionally contains:
 
