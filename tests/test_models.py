@@ -4,7 +4,13 @@ import pytest
 import torch
 
 from materials_gnn.featurization.line_graph import build_line_graph
-from materials_gnn.models import ALIGNNLikeModel, CGCNNModel, GatedGraphConv, ImplicitBiasActivation
+from materials_gnn.models import (
+    ALIGNNLikeModel,
+    CGCNNModel,
+    GatedGraphConv,
+    ImplicitBiasActivation,
+    ImplicitBiasMLPReadout,
+)
 
 
 def toy_graph(num_rbf: int = 16, num_angle_rbf: int = 8) -> dict[str, torch.Tensor | int]:
@@ -283,34 +289,48 @@ def test_implicit_bias_activation_zero_lambda_matches_silu() -> None:
 
 
 def test_cgcnn_forward_with_implicit_bias_readout() -> None:
+    torch.manual_seed(0)
     graph = toy_graph()
-    model = CGCNNModel(
-        edge_input_dim=16,
-        hidden_dim=32,
-        num_layers=2,
-        readout_type="implicit_bias",
-        ib_fixed_point_iters=3,
-    )
+    config = {
+        "edge_input_dim": 16,
+        "hidden_dim": 32,
+        "num_layers": 2,
+        "readout_type": "implicit_bias",
+        "ib_lambda": 0.02,
+        "ib_sigma_slope": 1.25,
+        "ib_fixed_point_iters": 3,
+        "ib_coupling": "dense",
+        "ib_trainable_lambda": True,
+    }
+    model = CGCNNModel(**config)
 
     out = model(graph)
 
+    assert isinstance(model.readout, ImplicitBiasMLPReadout)
     assert out.shape == (1,)
     assert torch.isfinite(out).all()
 
 
 def test_alignn_like_forward_with_implicit_bias_readout() -> None:
+    torch.manual_seed(0)
     graph = toy_graph()
-    model = ALIGNNLikeModel(
-        edge_input_dim=16,
-        angle_input_dim=8,
-        hidden_dim=32,
-        num_layers=2,
-        readout_type="implicit_bias",
-        ib_fixed_point_iters=3,
-    )
+    config = {
+        "edge_input_dim": 16,
+        "angle_input_dim": 8,
+        "hidden_dim": 32,
+        "num_layers": 2,
+        "readout_type": "implicit_bias",
+        "ib_lambda": 0.02,
+        "ib_sigma_slope": 1.25,
+        "ib_fixed_point_iters": 3,
+        "ib_coupling": "dense",
+        "ib_trainable_lambda": True,
+    }
+    model = ALIGNNLikeModel(**config)
 
     out = model(graph)
 
+    assert isinstance(model.readout, ImplicitBiasMLPReadout)
     assert out.shape == (1,)
     assert torch.isfinite(out).all()
 
