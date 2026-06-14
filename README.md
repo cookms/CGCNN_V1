@@ -478,7 +478,52 @@ python examples/predict_from_cif.py \
 ```
 
 For older checkpoints that do not contain config metadata, keep passing the model and
-graph flags explicitly, or add `--ignore-checkpoint-config` to force CLI settings.
+graph flags explicitly, or add `--ignore-checkpoint-config` to force CLI settings. This
+fallback path also supports optional edge weighting and implicit-bias readout flags, so
+legacy implicit-bias checkpoints can be reconstructed when the CLI arguments match the
+training architecture:
+
+```bash
+python examples/predict_from_cif.py \
+  --checkpoint runs/cgcnn_ib_readout_lam001/best_model.pt \
+  --cif data/cifs/Si.cif \
+  --model cgcnn \
+  --num-rbf 64 \
+  --hidden-dim 128 \
+  --num-layers 3 \
+  --readout-type implicit_bias \
+  --ib-lambda 0.01 \
+  --ib-sigma-slope 1.0 \
+  --ib-fixed-point-iters 8 \
+  --ib-coupling ring
+```
+
+Add `--ib-trainable-lambda` and `--use-edge-weight` when those options were used during
+training.
+
+## Compare training runs
+
+Use `examples/compare_runs.py` to flatten completed run directories into one sortable
+table. It reads `experiment_config.json`, `training_history.json`, and
+`test_predictions.csv`, then reports readout parameters, validation metrics, recomputed
+test MAE/RMSE/R2, and timing fields.
+
+```bash
+python examples/compare_runs.py \
+  --root runs \
+  --output-csv runs/run_comparison.csv \
+  --group-by readout_type
+```
+
+Compare only selected runs:
+
+```bash
+python examples/compare_runs.py \
+  runs/cgcnn_baseline \
+  runs/cgcnn_ib_readout_lam001 \
+  --sort-by test_mae \
+  --output-csv runs/cgcnn_readout_comparison.csv
+```
 
 ## Core graph fields
 

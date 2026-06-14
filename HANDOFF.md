@@ -61,6 +61,7 @@ Current CLI entry points are example scripts, not installed console commands:
 - `examples/predict_from_cif.py`
 - `examples/analyze_graph_dataset.py`
 - `examples/precompute_graph_cache.py`
+- `examples/compare_runs.py`
 
 ### Background Jobs / Workers
 
@@ -204,8 +205,8 @@ Important folders and files:
 | Training loop | Working | CPU-first, CUDA-compatible, optional AMP, AdamW, checkpointing, validation metrics, and training-history timing fields such as `train_seconds`, `val_seconds`, `epoch_seconds`, `elapsed_seconds`, and throughput estimates. |
 | CUDA support | Working / Basic | `device='auto'`, batch movement, pinned memory, optional AMP. Multi-GPU/distributed training not implemented. |
 | Persistent graph cache | Working | File-backed CPU tensor cache keyed by CIF fingerprint and graph configuration. Target labels, target column names, material IDs, and training-only settings are excluded from cache identity. Cache precomputation and graph analysis can use multiprocessing workers. |
-| Evaluation utilities | Working / Basic | MAE, RMSE, R2, parity/residual plots, CSV export. Matbench and uncertainty are placeholders. |
-| Inference from CIF | Working | New checkpoints store model and graph/inference config so `predict_from_cif.py` can reconstruct settings automatically. Legacy checkpoints still require CLI fallbacks. |
+| Evaluation utilities | Working / Basic | MAE, RMSE, R2, parity/residual plots, CSV export, and run comparison via `examples/compare_runs.py`. Matbench and uncertainty are placeholders. |
+| Inference from CIF | Working | New checkpoints store model and graph/inference config so `predict_from_cif.py` can reconstruct settings automatically. Legacy CLI fallbacks now include edge-weight and implicit-bias readout flags. |
 | Classification targets | Not started | Current pipeline assumes scalar regression. |
 | Multi-task prediction | Not started | `output_dim` exists, but dataset/training/evaluation are scalar-oriented. |
 | Attention/gated pooling | Not started | Only mean and sum pooling are implemented. |
@@ -220,7 +221,14 @@ Last full local test result recorded before the current implicit-bias/timing bra
 
 The skipped tests are `pymatgen`-dependent in environments where `pymatgen` is not installed or unavailable.
 
-Current branch verification note: syntax compilation has passed for edited Python files in the available bundled Python runtime, but full pytest could not be rerun in this shell because the accessible runtime lacks project dependencies such as `torch` and `pytest`.
+Current branch verification note for the implicit-bias checkpoint fallback update:
+
+```text
+C:\Users\mscoo\miniforge3\envs\CGCNN\python.exe -m pytest tests\test_experiment_config.py tests\test_training_cli_config.py --basetemp .codex_tmp_pytest -p no:cacheprovider
+6 passed, 2 warnings
+```
+
+The warnings are PyTorch `torch.load(..., weights_only=False)` future warnings.
 
 ## 5. Key Decisions Made
 
@@ -335,11 +343,11 @@ Current branch verification note: syntax compilation has passed for edited Pytho
 
 - Persistent graph cache keys include CIF fingerprint and graph/feature/line-graph settings. Changing `num_rbf`, atom descriptors, neighbor strategy, line-graph caps, or similar settings should automatically create a different cache entry. Target labels, target column names, material IDs, splits, and training-only settings do not affect the cache key. During debugging, `--overwrite-graph-cache` is still safest.
 
-- New checkpoints store model weights, optimizer-independent inference metadata, target normalizer state, and the full experiment configuration. `predict_from_cif.py` reads these settings automatically for new checkpoints; legacy checkpoints still require CLI fallbacks.
+- New checkpoints store model weights, optimizer-independent inference metadata, target normalizer state, and the full experiment configuration. `predict_from_cif.py` reads these settings automatically for new checkpoints; legacy checkpoints still require CLI fallbacks, including readout and implicit-bias flags when the saved model used `readout_type="implicit_bias"`.
 
 - `edge_weight` is collated and can be used by `CGCNNModel` and `ALIGNNLikeModel` when explicitly enabled. The layer accepts `[num_edges]` or `[num_edges, 1]` weights, casts them to the message dtype/device, and otherwise leaves values unchanged. Graph builders are responsible for meaningful weights.
 
-- Optional implicit-bias readout is controlled by model config fields and CLI flags: `readout_type`, `ib_lambda`, `ib_sigma_slope`, `ib_fixed_point_iters`, `ib_coupling`, and `ib_trainable_lambda`. Existing commands default to `readout_type="mlp"`.
+- Optional implicit-bias readout is controlled by model config fields and CLI flags: `readout_type`, `ib_lambda`, `ib_sigma_slope`, `ib_fixed_point_iters`, `ib_coupling`, and `ib_trainable_lambda`. Existing commands default to `readout_type="mlp"`. Training scripts and the `predict_from_cif.py` fallback path now expose these flags.
 
 - `training_history.json` now records timing fields per epoch. For comparing architecture changes, start with `train_samples_per_second` and use `epoch_seconds` as a sanity check.
 
@@ -360,6 +368,7 @@ Immediate recent goals:
 7. Add an optional implicit-bias readout head after crystal pooling for first implicit-bias experiments.
 8. Add training-history timing and throughput fields for speed comparisons across model variants.
 9. Add optional atom-graph edge-weight aggregation for CGCNN/ALIGNN-like experiments.
+10. Keep CIF prediction compatible with implicit-bias checkpoints through both checkpoint metadata and explicit legacy fallback CLI arguments.
 
 Files likely involved in the next iteration:
 
@@ -382,6 +391,7 @@ Files likely involved in the next iteration:
 - `examples/predict_from_cif.py`
 - `examples/analyze_graph_dataset.py`
 - `examples/precompute_graph_cache.py`
+- `examples/compare_runs.py`
 - `tests/`
 
 Current implementation approach:
@@ -411,7 +421,7 @@ Blockers or uncertainties:
 
 | Issue | Impact | Suggested next step |
 |---|---|---|
-| Legacy checkpoints may lack training/inference config | Old `best_model.pt` files may still require manually matching architecture and featurization flags | Prefer new checkpoints with embedded `experiment_config`; keep CLI fallback path for old checkpoints |
+| Legacy checkpoints may lack training/inference config | Old `best_model.pt` files may still require manually matching architecture, featurization, edge-weight, and readout flags | Prefer new checkpoints with embedded `experiment_config`; keep CLI fallback path for old checkpoints |
 | Atom-graph `edge_weight` is opt-in | Voronoi and strain-consensus weights still have no effect unless users pass `use_edge_weight=True` or `--use-edge-weight` | Compare weighted vs unweighted runs with identical seeds/splits before treating the weights as beneficial |
 | Implicit-bias readout is experimental | It may affect accuracy, stability, and speed in target-dependent ways | Compare baseline vs implicit-bias runs using identical seeds/splits and inspect both metrics and timing fields |
 | ALIGNN-like line graph can still OOM | Dense structures or large cutoffs can exceed GPU memory | Add graph statistics logging before training, optional dataset filtering, and automatic warnings when line-edge counts exceed thresholds |
@@ -609,11 +619,22 @@ python examples/train_cgcnn.py \
 After training, compare speed through per-epoch fields in `training_history.json`,
 especially `train_samples_per_second`, `train_seconds`, and `epoch_seconds`.
 
+For parameter sweeps, use `examples/compare_runs.py` to flatten run directories into a
+sortable table/CSV with readout settings, validation metrics, recomputed test metrics,
+and timing fields:
+
+```bash
+python examples/compare_runs.py \
+  --root runs \
+  --output-csv runs/run_comparison.csv \
+  --group-by readout_type
+```
+
 ### Predict from a CIF
 
 New checkpoints store model and graph configuration, so prediction can usually reconstruct
 the training settings from the checkpoint. Legacy checkpoints may still need explicit
-model and graph flags.
+model, graph, edge-weight, and readout flags.
 
 ```bash
 python examples/predict_from_cif.py \
@@ -622,6 +643,27 @@ python examples/predict_from_cif.py \
   --cif data/cifs/Si.cif \
   --cutoff 5.0
 ```
+
+For a legacy implicit-bias checkpoint without metadata, pass the readout arguments that
+match training:
+
+```bash
+python examples/predict_from_cif.py \
+  --checkpoint runs/cgcnn_ib_readout_lam001/best_model.pt \
+  --cif data/cifs/Si.cif \
+  --model cgcnn \
+  --num-rbf 64 \
+  --hidden-dim 128 \
+  --num-layers 3 \
+  --readout-type implicit_bias \
+  --ib-lambda 0.01 \
+  --ib-sigma-slope 1.0 \
+  --ib-fixed-point-iters 8 \
+  --ib-coupling ring
+```
+
+Add `--ib-trainable-lambda` and `--use-edge-weight` if those were enabled in the saved
+model.
 
 ### Tests
 
@@ -661,7 +703,9 @@ Tests live in `tests/`:
 - `test_line_graph.py`
 - `test_models.py`
 - `test_neighbor_strategies.py`
+- `test_experiment_config.py`
 - `test_training_cli_config.py`
+- `test_compare_runs.py`
 
 ### How to Run
 
@@ -671,10 +715,24 @@ From repository root:
 pytest
 ```
 
-Known result during this handoff inspection:
+Last full-suite result recorded before the current implicit-bias/timing branch work:
 
 ```text
 28 passed, 2 skipped
+```
+
+Focused verification for the implicit-bias checkpoint fallback update:
+
+```text
+C:\Users\mscoo\miniforge3\envs\CGCNN\python.exe -m pytest tests\test_experiment_config.py tests\test_training_cli_config.py --basetemp .codex_tmp_pytest -p no:cacheprovider
+6 passed, 2 warnings
+```
+
+Focused verification for the run-comparison utility:
+
+```text
+C:\Users\mscoo\miniforge3\envs\CGCNN\python.exe -m pytest tests\test_compare_runs.py --basetemp .codex_tmp_pytest -p no:cacheprovider
+3 passed
 ```
 
 ### What Is Covered
@@ -690,6 +748,9 @@ Known result during this handoff inspection:
 - Optional `GatedGraphConv` edge-weight shape handling and weighted aggregation behavior.
 - CGCNN and ALIGNN-like `use_edge_weight` opt-in behavior.
 - Training CLI `--use-edge-weight` propagation into model config.
+- Checkpoint metadata round trip for implicit-bias CGCNN inference reconstruction.
+- `predict_from_cif.py` smoke coverage for implicit-bias checkpoints loaded from metadata and from explicit legacy fallback CLI arguments.
+- Run-comparison flattening, metric recomputation from `test_predictions.csv`, and sorted CSV output.
 - AMP-safe `GatedGraphConv` dtype behavior through CPU autocast.
 - Batch collation offsets for atom and line-graph indices.
 - Optional `edge_weight`, `edge_unit_vec`, and `atom_attr` collation.
@@ -705,7 +766,6 @@ Known result during this handoff inspection:
 - No full training smoke test proving timing fields on a real CIF dataset.
 - No tests for Voronoi strategy against real structures in environments with `pymatgen`.
 - No performance or memory regression tests for line-graph size.
-- No checkpoint round-trip test for loading and predicting with saved models.
 - No CLI end-to-end tests for example scripts.
 - No Matbench, uncertainty, classification, or multi-task tests.
 
@@ -763,7 +823,7 @@ Not applicable.
 - There is no standardized experiment tracking.
 - There is no distributed training launcher.
 - Graph cache files are local and unmanaged.
-- New checkpoints store full experiment configs and inference settings; legacy checkpoints still need CLI fallback arguments.
+- New checkpoints store full experiment configs and inference settings; legacy checkpoints still need CLI fallback arguments, including readout flags for implicit-bias models.
 
 ## 12. Next Recommended Steps
 
@@ -771,9 +831,10 @@ Not applicable.
 - [x] Add graph statistics utilities and an `examples/analyze_graph_dataset.py` script to report atom counts, edge counts, line-edge counts, distance ranges, and likely OOM risks before training.
 - [x] Decide how `edge_weight` should enter message passing, then implement optional weighted aggregation in `GatedGraphConv` with tests.
 - [x] Add a cache precomputation CLI so large datasets can build graphs before training instead of during the first epoch. Multiprocessing is available through `--num-workers`.
+- [x] Add a run-comparison CLI for readout and parameter sweeps.
 - [ ] Add attention or gated pooling as a configurable alternative to mean/sum pooling.
 - [ ] Add Matbench-style dataset adapters and standardized split/evaluation workflows.
-- [ ] Add checkpoint round-trip and example-script smoke tests.
+- [x] Add checkpoint round-trip and example-script smoke tests for implicit-bias prediction loading.
 - [ ] Add basic classification and multi-task support across dataset, loss, metrics, and readout.
 - [ ] Add first equivariant feature/model experiment using `edge_vec` or `edge_unit_vec`, while preserving current invariant CGCNN/ALIGNN-like baselines.
 - [ ] Add CI with CPU tests, linting, and an optional `pymatgen` test environment.

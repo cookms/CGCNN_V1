@@ -43,6 +43,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-rbf", type=int, default=64)
     parser.add_argument("--distance-basis", choices=["gaussian", "bessel", "fourier"], default="gaussian", help="Static preprocessing basis for bond distances")
     parser.add_argument("--learnable-distance-basis", action="store_true", help="Use a trainable Gaussian distance basis inside the model")
+    parser.add_argument(
+        "--use-edge-weight",
+        action="store_true",
+        help="Fallback option to use optional graph['edge_weight'] scalars in message aggregation",
+    )
     parser.add_argument("--atom-features", default="", help="Comma-separated elemental descriptors or 'default'")
     parser.add_argument("--num-angle-rbf", type=int, default=32)
     parser.add_argument("--angle-basis", choices=["gaussian", "bessel", "fourier"], default="gaussian", help="Static preprocessing basis for bond angles")
@@ -68,6 +73,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--hidden-dim", type=int, default=128)
     parser.add_argument("--num-layers", type=int, default=3)
+    parser.add_argument("--readout-type", choices=["mlp", "implicit_bias"], default="mlp")
+    parser.add_argument("--ib-lambda", type=float, default=0.01)
+    parser.add_argument("--ib-sigma-slope", type=float, default=1.0)
+    parser.add_argument("--ib-fixed-point-iters", type=int, default=8)
+    parser.add_argument("--ib-coupling", choices=["ring", "dense"], default="ring")
+    parser.add_argument("--ib-trainable-lambda", action="store_true")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     return parser.parse_args()
 
@@ -134,6 +145,13 @@ def _legacy_settings_from_args(args: argparse.Namespace) -> tuple[str, dict[str,
             "atom_feature_names": args.atom_features or None,
             "distance_basis_type": "learnable_gaussian" if args.learnable_distance_basis else None,
             "distance_basis_cutoff": distance_basis_cutoff,
+            "use_edge_weight": args.use_edge_weight,
+            "readout_type": args.readout_type,
+            "ib_lambda": args.ib_lambda,
+            "ib_sigma_slope": args.ib_sigma_slope,
+            "ib_fixed_point_iters": args.ib_fixed_point_iters,
+            "ib_coupling": args.ib_coupling,
+            "ib_trainable_lambda": args.ib_trainable_lambda,
         }
     else:
         inference_config["line_graph_kwargs"] = {
@@ -154,6 +172,13 @@ def _legacy_settings_from_args(args: argparse.Namespace) -> tuple[str, dict[str,
             "distance_basis_cutoff": distance_basis_cutoff,
             "angle_basis_type": "learnable_gaussian" if args.learnable_angle_basis else None,
             "angle_basis_use_cosine": args.angle_basis_use_cosine,
+            "use_edge_weight": args.use_edge_weight,
+            "readout_type": args.readout_type,
+            "ib_lambda": args.ib_lambda,
+            "ib_sigma_slope": args.ib_sigma_slope,
+            "ib_fixed_point_iters": args.ib_fixed_point_iters,
+            "ib_coupling": args.ib_coupling,
+            "ib_trainable_lambda": args.ib_trainable_lambda,
         }
     return args.model, model_config, inference_config
 
