@@ -71,6 +71,97 @@ def test_gated_graph_conv_accepts_1d_edge_weight() -> None:
 
     assert x_out.shape == x.shape
     assert e_out.shape == edge_attr.shape
+    assert torch.isfinite(x_out).all()
+    assert torch.isfinite(e_out).all()
+    assert torch.isfinite(x_out).all()
+    assert torch.isfinite(e_out).all()
+
+
+def _has_implicit_bias_activation(module: torch.nn.Module) -> bool:
+    return any(isinstance(child, ImplicitBiasActivation) for child in module.modules())
+
+
+@pytest.mark.parametrize(
+    ("conv_ib_targets", "expected_targets"),
+    [
+        (("edge",), {"edge"}),
+        (("message",), {"message"}),
+        (("node",), {"node"}),
+        (("all",), {"edge", "message", "node"}),
+    ],
+    ids=["edge", "message", "node", "all"],
+)
+def test_gated_graph_conv_with_implicit_bias_activation_targets(
+    conv_ib_targets: tuple[str, ...],
+    expected_targets: set[str],
+) -> None:
+    conv = GatedGraphConv(
+        node_dim=12,
+        edge_dim=6,
+        conv_activation_type="implicit_bias",
+        conv_ib_targets=conv_ib_targets,
+        conv_ib_fixed_point_iters=2,
+    )
+    x = torch.randn(4, 12)
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    edge_attr = torch.randn(3, 6)
+
+    x_out, e_out = conv(x, edge_index, edge_attr)
+
+    assert x_out.shape == x.shape
+    assert e_out.shape == edge_attr.shape
+    assert torch.isfinite(x_out).all()
+    assert torch.isfinite(e_out).all()
+    assert _has_implicit_bias_activation(conv.edge_mlp) is ("edge" in expected_targets)
+    assert _has_implicit_bias_activation(conv.message_mlp) is ("message" in expected_targets)
+    assert _has_implicit_bias_activation(conv.node_mlp) is ("node" in expected_targets)
+    assert not _has_implicit_bias_activation(conv.gate_mlp)
+
+
+def test_gated_graph_conv_implicit_bias_node_activation_handles_edgeless_graph() -> None:
+    conv = GatedGraphConv(
+        node_dim=12,
+        edge_dim=6,
+        conv_activation_type="implicit_bias",
+        conv_ib_targets=("node",),
+        conv_ib_fixed_point_iters=2,
+    )
+    x = torch.randn(4, 12)
+    edge_index = torch.empty((2, 0), dtype=torch.long)
+    edge_attr = torch.empty((0, 6))
+
+    x_out, e_out = conv(x, edge_index, edge_attr)
+
+    assert x_out.shape == x.shape
+    assert e_out.shape == edge_attr.shape
+    assert torch.isfinite(x_out).all()
+    assert torch.isfinite(e_out).all()
+
+
+def test_gated_graph_conv_implicit_bias_gradients_flow() -> None:
+    conv = GatedGraphConv(
+        node_dim=12,
+        edge_dim=6,
+        conv_activation_type="implicit_bias",
+        conv_ib_targets=("all",),
+        conv_ib_fixed_point_iters=2,
+    )
+    x = torch.randn(4, 12, requires_grad=True)
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+    edge_attr = torch.randn(3, 6, requires_grad=True)
+
+    x_out, e_out = conv(x, edge_index, edge_attr)
+    loss = x_out.pow(2).mean() + e_out.pow(2).mean()
+    loss.backward()
+
+    finite_nonzero_grads = [
+        param.grad
+        for param in conv.parameters()
+        if param.grad is not None
+        and torch.isfinite(param.grad).all()
+        and param.grad.detach().abs().sum() > 0
+    ]
+    assert finite_nonzero_grads
 
 
 def test_gated_graph_conv_accepts_column_edge_weight() -> None:
@@ -141,6 +232,23 @@ def test_cgcnn_forward_shape() -> None:
     assert torch.isfinite(out).all()
 
 
+def test_cgcnn_forward_with_convolution_implicit_bias() -> None:
+    graph = toy_graph()
+    model = CGCNNModel(
+        edge_input_dim=16,
+        hidden_dim=32,
+        num_layers=2,
+        conv_activation_type="implicit_bias",
+        conv_ib_targets=("all",),
+        conv_ib_fixed_point_iters=2,
+    )
+
+    out = model(graph)
+
+    assert out.shape == (1,)
+    assert torch.isfinite(out).all()
+
+
 def test_cgcnn_ignores_edge_weight_when_disabled() -> None:
     torch.manual_seed(10)
     graph = toy_graph()
@@ -172,6 +280,24 @@ def test_cgcnn_uses_edge_weight_when_enabled() -> None:
 def test_alignn_like_forward_shape() -> None:
     graph = toy_graph()
     model = ALIGNNLikeModel(edge_input_dim=16, angle_input_dim=8, hidden_dim=32, num_layers=2)
+
+    out = model(graph)
+
+    assert out.shape == (1,)
+    assert torch.isfinite(out).all()
+
+
+def test_alignn_like_forward_with_convolution_implicit_bias() -> None:
+    graph = toy_graph()
+    model = ALIGNNLikeModel(
+        edge_input_dim=16,
+        angle_input_dim=8,
+        hidden_dim=32,
+        num_layers=2,
+        conv_activation_type="implicit_bias",
+        conv_ib_targets=("all",),
+        conv_ib_fixed_point_iters=2,
+    )
 
     out = model(graph)
 

@@ -63,6 +63,13 @@ class CGCNNModel(nn.Module):
         ib_coupling: str = "ring",
         ib_trainable_lambda: bool = False,
         use_edge_weight: bool = False,
+        conv_activation_type: str = "silu",
+        conv_ib_lambda: float = 0.01,
+        conv_ib_sigma_slope: float = 1.0,
+        conv_ib_fixed_point_iters: int = 8,
+        conv_ib_coupling: str = "ring",
+        conv_ib_trainable_lambda: bool = False,
+        conv_ib_targets: Sequence[str] | str = (),
     ) -> None:
         super().__init__()
         self.pooling = pooling
@@ -85,8 +92,18 @@ class CGCNNModel(nn.Module):
                 **dict(distance_basis_kwargs or {}),
             )
         self.bond_embedding = nn.Sequential(nn.Linear(edge_input_dim, hidden_dim), nn.SiLU())
+        conv_kwargs = {
+            "dropout": dropout,
+            "conv_activation_type": conv_activation_type,
+            "conv_ib_lambda": conv_ib_lambda,
+            "conv_ib_sigma_slope": conv_ib_sigma_slope,
+            "conv_ib_fixed_point_iters": conv_ib_fixed_point_iters,
+            "conv_ib_coupling": conv_ib_coupling,
+            "conv_ib_trainable_lambda": conv_ib_trainable_lambda,
+            "conv_ib_targets": conv_ib_targets,
+        }
         self.convs = nn.ModuleList(
-            [GatedGraphConv(hidden_dim, hidden_dim, dropout=dropout) for _ in range(num_layers)]
+            [GatedGraphConv(hidden_dim, hidden_dim, **conv_kwargs) for _ in range(num_layers)]
         )
         self.readout = make_readout(
             readout_type,

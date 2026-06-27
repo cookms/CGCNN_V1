@@ -23,6 +23,22 @@ from materials_gnn.training import dataloader_device_kwargs, evaluate_model, res
 from materials_gnn.utils import write_experiment_config
 
 
+_VALID_CONV_IB_TARGETS = {"edge", "message", "node", "all"}
+
+
+def _parse_csv_targets(value: str) -> tuple[str, ...]:
+    if not value:
+        return ()
+    targets = tuple(part.strip().lower() for part in value.split(",") if part.strip())
+    invalid = sorted(set(targets) - _VALID_CONV_IB_TARGETS)
+    if invalid:
+        raise ValueError(
+            "--conv-ib-targets must contain only edge, message, node, or all; "
+            f"got {invalid}"
+        )
+    return targets
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train an ALIGNN-like crystal GNN")
     parser.add_argument("--csv", required=True, help="CSV with material_id,cif_path,target columns")
@@ -76,6 +92,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ib-fixed-point-iters", type=int, default=8)
     parser.add_argument("--ib-coupling", choices=["ring", "dense"], default="ring")
     parser.add_argument("--ib-trainable-lambda", action="store_true")
+    parser.add_argument("--conv-activation-type", choices=["silu", "implicit_bias"], default="silu")
+    parser.add_argument("--conv-ib-lambda", type=float, default=0.01)
+    parser.add_argument("--conv-ib-sigma-slope", type=float, default=1.0)
+    parser.add_argument("--conv-ib-fixed-point-iters", type=int, default=8)
+    parser.add_argument("--conv-ib-coupling", choices=["ring", "dense"], default="ring")
+    parser.add_argument("--conv-ib-trainable-lambda", action="store_true")
+    parser.add_argument("--conv-ib-targets", type=str, default="")
     parser.add_argument("--hidden-dim", type=int, default=128)
     parser.add_argument("--num-layers", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=16)
@@ -171,6 +194,13 @@ def _model_config_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "ib_fixed_point_iters": args.ib_fixed_point_iters,
         "ib_coupling": args.ib_coupling,
         "ib_trainable_lambda": args.ib_trainable_lambda,
+        "conv_activation_type": args.conv_activation_type,
+        "conv_ib_lambda": args.conv_ib_lambda,
+        "conv_ib_sigma_slope": args.conv_ib_sigma_slope,
+        "conv_ib_fixed_point_iters": args.conv_ib_fixed_point_iters,
+        "conv_ib_coupling": args.conv_ib_coupling,
+        "conv_ib_trainable_lambda": args.conv_ib_trainable_lambda,
+        "conv_ib_targets": _parse_csv_targets(args.conv_ib_targets),
     }
 
 

@@ -34,6 +34,19 @@ def test_train_cgcnn_model_config_captures_architecture_and_research_toggles(mon
             "--ib-coupling",
             "dense",
             "--ib-trainable-lambda",
+            "--conv-activation-type",
+            "implicit_bias",
+            "--conv-ib-lambda",
+            "0.04",
+            "--conv-ib-sigma-slope",
+            "1.9",
+            "--conv-ib-fixed-point-iters",
+            "3",
+            "--conv-ib-coupling",
+            "dense",
+            "--conv-ib-trainable-lambda",
+            "--conv-ib-targets",
+            "edge,message",
         ],
     )
 
@@ -51,6 +64,13 @@ def test_train_cgcnn_model_config_captures_architecture_and_research_toggles(mon
     assert config["ib_fixed_point_iters"] == 5
     assert config["ib_coupling"] == "dense"
     assert config["ib_trainable_lambda"] is True
+    assert config["conv_activation_type"] == "implicit_bias"
+    assert config["conv_ib_lambda"] == 0.04
+    assert config["conv_ib_sigma_slope"] == 1.9
+    assert config["conv_ib_fixed_point_iters"] == 3
+    assert config["conv_ib_coupling"] == "dense"
+    assert config["conv_ib_trainable_lambda"] is True
+    assert config["conv_ib_targets"] == ("edge", "message")
 
     inference_config = train_cgcnn._inference_config_from_args(args)
     assert inference_config["include_line_graph"] is False
@@ -88,6 +108,19 @@ def test_train_alignn_like_model_config_captures_architecture_and_research_toggl
             "--ib-coupling",
             "dense",
             "--ib-trainable-lambda",
+            "--conv-activation-type",
+            "implicit_bias",
+            "--conv-ib-lambda",
+            "0.04",
+            "--conv-ib-sigma-slope",
+            "1.9",
+            "--conv-ib-fixed-point-iters",
+            "3",
+            "--conv-ib-coupling",
+            "dense",
+            "--conv-ib-trainable-lambda",
+            "--conv-ib-targets",
+            "all",
         ],
     )
 
@@ -108,6 +141,13 @@ def test_train_alignn_like_model_config_captures_architecture_and_research_toggl
     assert config["ib_fixed_point_iters"] == 5
     assert config["ib_coupling"] == "dense"
     assert config["ib_trainable_lambda"] is True
+    assert config["conv_activation_type"] == "implicit_bias"
+    assert config["conv_ib_lambda"] == 0.04
+    assert config["conv_ib_sigma_slope"] == 1.9
+    assert config["conv_ib_fixed_point_iters"] == 3
+    assert config["conv_ib_coupling"] == "dense"
+    assert config["conv_ib_trainable_lambda"] is True
+    assert config["conv_ib_targets"] == ("all",)
 
     inference_config = train_alignn_like._inference_config_from_args(args)
     assert inference_config["include_line_graph"] is True

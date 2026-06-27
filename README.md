@@ -456,6 +456,13 @@ python examples/train_alignn_like.py --csv data/id_prop.csv --target target \
   --output-dir runs/alignn_ib_readout_lam001
 ```
 
+## Implicit-bias convolution experiment
+
+Experiment 2 moves the optional implicit-bias activation into selected hidden MLPs inside
+`GatedGraphConv` while leaving the edge gate unchanged. See the
+[runnable experiment-2 protocol](docs/implicit_bias_experiments.md) for baseline,
+node-only, message-only, edge-only, all-target, ALIGNN-like, and sweep commands.
+
 ## Predict from a CIF
 
 Training writes `experiment_config.json`, `training_history.json`, `best_model.pt`, and

@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 import torch
 from torch import Tensor, nn
+
+from materials_gnn.models.implicit_bias import ImplicitBiasActivation
+
+
+_CONV_IB_TARGETS = frozenset({"edge", "message", "node"})
 
 
 def build_mlp(
@@ -27,6 +32,53 @@ def build_mlp(
             if dropout > 0:
                 layers.append(nn.Dropout(dropout))
     return nn.Sequential(*layers)
+
+
+def build_mlp_with_activation_factory(
+    input_dim: int,
+    hidden_dims: Sequence[int],
+    output_dim: int,
+    *,
+    activation_factory: Callable[[int], nn.Module],
+    dropout: float = 0.0,
+) -> nn.Sequential:
+    """Construct an MLP whose hidden activation can depend on hidden width."""
+
+    dims = [input_dim, *hidden_dims, output_dim]
+    layers: list[nn.Module] = []
+    last_hidden_idx = len(dims) - 2
+    for idx, (in_dim, out_dim) in enumerate(zip(dims[:-1], dims[1:], strict=True)):
+        layers.append(nn.Linear(in_dim, out_dim))
+        if idx < last_hidden_idx:
+            layers.append(activation_factory(out_dim))
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
+    return nn.Sequential(*layers)
+
+
+def _normalize_conv_ib_targets(conv_ib_targets: Sequence[str] | str) -> frozenset[str]:
+    if isinstance(conv_ib_targets, str):
+        raw_targets = tuple(
+            part.strip().lower() for part in conv_ib_targets.split(",") if part.strip()
+        )
+    else:
+        raw_targets = tuple(str(part).strip().lower() for part in conv_ib_targets if str(part).strip())
+
+    if not raw_targets or raw_targets == ("none",):
+        return frozenset()
+
+    allowed = _CONV_IB_TARGETS | {"all", "none"}
+    invalid = sorted(set(raw_targets) - allowed)
+    if invalid:
+        raise ValueError(
+            "conv_ib_targets must contain only 'edge', 'message', 'node', 'all', or 'none'; "
+            f"got {invalid}"
+        )
+    if "none" in raw_targets and len(raw_targets) > 1:
+        raise ValueError("conv_ib_targets='none' cannot be combined with other targets")
+    if "all" in raw_targets:
+        return _CONV_IB_TARGETS
+    return frozenset(raw_targets)
 
 
 class GatedGraphConv(nn.Module):
@@ -56,32 +108,86 @@ class GatedGraphConv(nn.Module):
         hidden_dim: int | None = None,
         residual: bool = True,
         dropout: float = 0.0,
+        conv_activation_type: str = "silu",
+        conv_ib_lambda: float = 0.01,
+        conv_ib_sigma_slope: float = 1.0,
+        conv_ib_fixed_point_iters: int = 8,
+        conv_ib_coupling: str = "ring",
+        conv_ib_trainable_lambda: bool = False,
+        conv_ib_targets: Sequence[str] | str = (),
     ) -> None:
         super().__init__()
+        if conv_activation_type not in {"silu", "implicit_bias"}:
+            raise ValueError(
+                "conv_activation_type must be either 'silu' or 'implicit_bias'; "
+                f"got {conv_activation_type!r}"
+            )
+        targets = _normalize_conv_ib_targets(conv_ib_targets)
+
         hidden = hidden_dim or max(node_dim, edge_dim)
         self.node_dim = node_dim
         self.edge_dim = edge_dim
         self.residual = residual
+        self.conv_activation_type = conv_activation_type
+        self.conv_ib_targets = tuple(sorted(targets))
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
-        self.edge_mlp = build_mlp(
+        def _uses_implicit_bias(target_name: str) -> bool:
+            return conv_activation_type == "implicit_bias" and target_name in targets
+
+        def _make_activation_factory(target_name: str) -> Callable[[int], nn.Module]:
+            if _uses_implicit_bias(target_name):
+                return lambda dim: ImplicitBiasActivation(
+                    dim,
+                    ib_lambda=conv_ib_lambda,
+                    sigma_slope=conv_ib_sigma_slope,
+                    fixed_point_iters=conv_ib_fixed_point_iters,
+                    coupling=conv_ib_coupling,
+                    activation="silu",
+                    trainable_lambda=conv_ib_trainable_lambda,
+                )
+            return lambda _dim: nn.SiLU()
+
+        def _build_conv_mlp(
+            target_name: str,
+            *,
+            input_dim: int,
+            hidden_dims: Sequence[int],
+            output_dim: int,
+        ) -> nn.Sequential:
+            if _uses_implicit_bias(target_name):
+                return build_mlp_with_activation_factory(
+                    input_dim=input_dim,
+                    hidden_dims=hidden_dims,
+                    output_dim=output_dim,
+                    activation_factory=_make_activation_factory(target_name),
+                    dropout=dropout,
+                )
+            return build_mlp(
+                input_dim=input_dim,
+                hidden_dims=hidden_dims,
+                output_dim=output_dim,
+                dropout=dropout,
+            )
+
+        self.edge_mlp = _build_conv_mlp(
+            "edge",
             input_dim=2 * node_dim + edge_dim,
             hidden_dims=[hidden],
             output_dim=edge_dim,
-            dropout=dropout,
         )
-        self.message_mlp = build_mlp(
+        self.message_mlp = _build_conv_mlp(
+            "message",
             input_dim=node_dim + edge_dim,
             hidden_dims=[hidden],
             output_dim=node_dim,
-            dropout=dropout,
         )
         self.gate_mlp = nn.Sequential(nn.Linear(edge_dim, node_dim), nn.Sigmoid())
-        self.node_mlp = build_mlp(
+        self.node_mlp = _build_conv_mlp(
+            "node",
             input_dim=2 * node_dim,
             hidden_dims=[hidden],
             output_dim=node_dim,
-            dropout=dropout,
         )
 
         self.node_norm = nn.LayerNorm(node_dim)

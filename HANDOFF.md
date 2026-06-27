@@ -8,7 +8,13 @@ The package currently provides a clear raw-PyTorch prototype inspired by CGCNN a
 
 Current package version in `pyproject.toml`: `0.4.2`.
 
-Current active branch for the implicit-bias research direction: `codex/implicit-bias-readout`.
+Current active branch for the implicit-bias research direction:
+`exp2-implicit-bias-gated-conv`.
+
+The current working tree contains the experiment-2 implementation and documentation.
+It also contains a separate local change to the Voronoi `allow_pathological` default and
+an untracked `materials_gnn/data/subsets/id_prop_100000.csv`; those are not part of
+experiment 2 and should not be reverted or folded into it without an explicit decision.
 
 ## 2. Current Architecture
 
@@ -143,7 +149,11 @@ Important folders and files:
   Reproducible train/validation/test splits and scalar target normalization.
 
 - `materials_gnn/models/layers.py`  
-  `GatedGraphConv`, a reusable edge-gated message-passing layer for atom/bond graphs and line graphs. It supports optional atom-graph `edge_weight` aggregation when callers pass weights. Also contains `build_mlp`.
+  `GatedGraphConv`, a reusable edge-gated message-passing layer for atom/bond graphs and
+  line graphs. It supports optional atom-graph `edge_weight` aggregation and optional
+  implicit-bias hidden activations in `edge_mlp`, `message_mlp`, and `node_mlp`. The
+  `gate_mlp` remains `Linear(edge_dim, node_dim) -> Sigmoid`. Also contains `build_mlp`
+  and `build_mlp_with_activation_factory`.
 
 - `materials_gnn/models/cgcnn.py`  
   Distance-only atom/bond graph model for scalar prediction.
@@ -155,7 +165,9 @@ Important folders and files:
   Mean/sum graph pooling, the standard MLP readout head, and a `make_readout` helper for standard vs implicit-bias readouts.
 
 - `materials_gnn/models/implicit_bias.py`  
-  Optional implicit-bias readout components: `ImplicitBiasActivation` and `ImplicitBiasMLPReadout`. This branch only uses the implicit-bias neuron idea after crystal pooling, not inside message passing.
+  Shared plain-PyTorch implicit-bias components: `ImplicitBiasActivation` and
+  `ImplicitBiasMLPReadout`. Experiment 1 uses the activation after crystal pooling;
+  experiment 2 reuses the same activation inside selected convolution MLP hidden layers.
 
 - `materials_gnn/training/device.py`  
   CPU/CUDA device resolution, recursive batch movement, DataLoader pinned-memory kwargs, and optional float32 matmul precision setting.
@@ -199,6 +211,7 @@ Important folders and files:
 | CGCNN-style model | Working | Plain PyTorch atom/bond graph model with gated message passing and pooling. Optional atom-graph edge weighting is available via `use_edge_weight=True` or `--use-edge-weight`. |
 | ALIGNN-like model | Working | Alternates line-graph bond/angle update and atom/bond update. Optional `edge_weight` affects only atom/bond updates, not line-graph updates. Can run out of memory on dense line graphs without caps. |
 | Implicit-bias readout | Working / Experimental | Optional post-pooling readout head for `CGCNNModel` and `ALIGNNLikeModel` via `readout_type="implicit_bias"` or `--readout-type implicit_bias`. Default remains the original MLP readout. |
+| Implicit-bias convolution activations | Working / Experimental | Optional hidden activation in `GatedGraphConv.edge_mlp`, `message_mlp`, and/or `node_mlp`. Controlled independently with `conv_activation_type` and `conv_ib_*` settings. Default remains the historical SiLU path, and `gate_mlp` is unchanged. |
 | Line-graph memory controls | Working | `max_outgoing_neighbors`, `max_line_edges`, and `line_neighbor_selection` are implemented and exposed in `train_alignn_like.py`. |
 | Dataset and collation | Working | Supports variable-size graph batching, node/edge/line-edge index offsets, optional `atom_attr`, `edge_weight`, `edge_unit_vec`, raw angles/cosines. |
 | Target normalization | Working | Train-set mean/std via `TargetNormalizer`. Validation/test metrics are inverse-transformed when normalizer is supplied. |
@@ -213,22 +226,16 @@ Important folders and files:
 | Config-driven experiments | Partial / Working | Example scripts still use argparse, but each run now writes `experiment_config.json` and embeds full experiment metadata in checkpoints. |
 | Deployment | Not started | No package publishing, Docker, CI/CD, or cluster launch scripts. |
 
-Last full local test result recorded before the current implicit-bias/timing branch work:
+Current experiment-2 acceptance result:
 
 ```text
-28 passed, 2 skipped
+C:\Users\mscoo\miniforge3\envs\CGCNN\python.exe -m pytest -q -p no:cacheprovider -p no:anyio --basetemp .pytest_tmp\acceptance-full
+64 passed, 20 warnings in 7.11s
 ```
 
-The skipped tests are `pymatgen`-dependent in environments where `pymatgen` is not installed or unavailable.
-
-Current branch verification note for the implicit-bias checkpoint fallback update:
-
-```text
-C:\Users\mscoo\miniforge3\envs\CGCNN\python.exe -m pytest tests\test_experiment_config.py tests\test_training_cli_config.py --basetemp .codex_tmp_pytest -p no:cacheprovider
-6 passed, 2 warnings
-```
-
-The warnings are PyTorch `torch.load(..., weights_only=False)` future warnings.
+The warnings are two PyTorch `torch.load(..., weights_only=False)` future warnings and
+18 pymatgen warnings for unavailable elemental electronegativity values. Both training
+CLI help commands also completed successfully and displayed every `conv_` experiment flag.
 
 ## 5. Key Decisions Made
 
@@ -262,8 +269,11 @@ The warnings are PyTorch `torch.load(..., weights_only=False)` future warnings.
 - **Keep `edge_weight` optional and make weighted aggregation explicit.**  
   Reasoning: Voronoi and strain-consensus strategies can emit geometric weights, but default model behavior must remain unchanged. `CGCNNModel` and `ALIGNNLikeModel` therefore ignore `graph["edge_weight"]` unless `use_edge_weight=True` or `--use-edge-weight` is set. `ALIGNNLikeModel` applies this only to atom/bond graph updates; line-graph edge weights are intentionally not implemented.
 
-- **Prototype implicit-bias neurons only in the readout first.**  
-  Reasoning: the current branch adds an optional implicit-bias hidden activation after crystal pooling, leaving graph construction and `GatedGraphConv` message passing unchanged. This isolates the research variable and keeps default model behavior unchanged.
+- **Prototype implicit-bias neurons in staged experiments.**
+  Reasoning: experiment 1 added an optional activation after crystal pooling. Experiment 2
+  reuses it independently across feature channels inside selected `GatedGraphConv` hidden
+  MLPs while preserving graph topology, pooling, readout defaults, and the edge gate.
+  Graph-aware coupling across atoms or nodes is intentionally deferred to experiment 3.
 
 - **Record timing in training history.**  
   Reasoning: model and graph changes should be compared on speed as well as metrics. Epoch records now include train/validation/total elapsed time and train throughput estimates, and checkpoints retain the same history payload.
@@ -349,6 +359,17 @@ The warnings are PyTorch `torch.load(..., weights_only=False)` future warnings.
 
 - Optional implicit-bias readout is controlled by model config fields and CLI flags: `readout_type`, `ib_lambda`, `ib_sigma_slope`, `ib_fixed_point_iters`, `ib_coupling`, and `ib_trainable_lambda`. Existing commands default to `readout_type="mlp"`. Training scripts and the `predict_from_cif.py` fallback path now expose these flags.
 
+- Optional convolution implicit bias is controlled separately by
+  `conv_activation_type`, `conv_ib_lambda`, `conv_ib_sigma_slope`,
+  `conv_ib_fixed_point_iters`, `conv_ib_coupling`, `conv_ib_trainable_lambda`, and
+  `conv_ib_targets`. Accepted targets are `edge`, `message`, `node`, and `all`. The
+  training CLIs accept a comma-separated target list. With no new flags, model structure
+  and behavior follow the pre-experiment convolution path.
+
+- The runnable experiment-2 protocol is in `docs/implicit_bias_experiments.md` and is
+  linked from `README.md`. It includes baseline, node-only, message-only, edge-only,
+  all-target, ALIGNN-like, and 4 x 3 x 2 sweep commands.
+
 - `training_history.json` now records timing fields per epoch. For comparing architecture changes, start with `train_samples_per_second` and use `epoch_seconds` as a sanity check.
 
 - `num_workers > 0` can help hide graph construction time, but can also increase CPU/RAM pressure. With persistent graph caching, the first epoch may still be expensive because graphs are built lazily.
@@ -369,6 +390,9 @@ Immediate recent goals:
 8. Add training-history timing and throughput fields for speed comparisons across model variants.
 9. Add optional atom-graph edge-weight aggregation for CGCNN/ALIGNN-like experiments.
 10. Keep CIF prediction compatible with implicit-bias checkpoints through both checkpoint metadata and explicit legacy fallback CLI arguments.
+11. Add optional implicit-bias hidden activations inside selected `GatedGraphConv` MLPs
+    while keeping default behavior and `gate_mlp` unchanged.
+12. Document a reproducible target-isolation sequence and small hyperparameter sweep.
 
 Files likely involved in the next iteration:
 
@@ -424,6 +448,7 @@ Blockers or uncertainties:
 | Legacy checkpoints may lack training/inference config | Old `best_model.pt` files may still require manually matching architecture, featurization, edge-weight, and readout flags | Prefer new checkpoints with embedded `experiment_config`; keep CLI fallback path for old checkpoints |
 | Atom-graph `edge_weight` is opt-in | Voronoi and strain-consensus weights still have no effect unless users pass `use_edge_weight=True` or `--use-edge-weight` | Compare weighted vs unweighted runs with identical seeds/splits before treating the weights as beneficial |
 | Implicit-bias readout is experimental | It may affect accuracy, stability, and speed in target-dependent ways | Compare baseline vs implicit-bias runs using identical seeds/splits and inspect both metrics and timing fields |
+| Implicit-bias convolution activation is experimental | Channel coupling adds fixed-point work to every targeted edge/node hidden transform and may affect stability or epoch time | Run node, message, edge, and all-target isolation before the documented lambda/iteration/coupling sweep; monitor NaNs and timing |
 | ALIGNN-like line graph can still OOM | Dense structures or large cutoffs can exceed GPU memory | Add graph statistics logging before training, optional dataset filtering, and automatic warnings when line-edge counts exceed thresholds |
 | Graph construction is lazy before cache warms | First epoch can be slow if cache was not precomputed | Use `examples/precompute_graph_cache.py --num-workers N` to populate the persistent cache before training; future work can add pruning/indexing and duplicate-key de-duplication |
 | Persistent graph cache has no pruning/index | Cache directory can grow indefinitely across experiments | Add cache manifest, size reporting, and cleanup utilities by namespace/date/config |
@@ -616,6 +641,27 @@ python examples/train_cgcnn.py \
   --ib-coupling ring
 ```
 
+Use experiment 2 with implicit bias in all convolution hidden MLPs while retaining the
+standard readout:
+
+```bash
+python examples/train_cgcnn.py \
+  --csv data/id_prop.csv \
+  --target target \
+  --seed 42 \
+  --readout-type mlp \
+  --conv-activation-type implicit_bias \
+  --conv-ib-targets all \
+  --conv-ib-lambda 0.01 \
+  --conv-ib-sigma-slope 1.0 \
+  --conv-ib-fixed-point-iters 8 \
+  --conv-ib-coupling ring \
+  --output-dir runs/cgcnn_conv_ib_all_lam001
+```
+
+See `docs/implicit_bias_experiments.md` for the exact baseline, node-only,
+message-only, edge-only, all-target, ALIGNN-like, and 24-run sweep commands.
+
 After training, compare speed through per-epoch fields in `training_history.json`,
 especially `train_samples_per_second`, `train_seconds`, and `epoch_seconds`.
 
@@ -715,25 +761,16 @@ From repository root:
 pytest
 ```
 
-Last full-suite result recorded before the current implicit-bias/timing branch work:
+Latest full-suite result on `exp2-implicit-bias-gated-conv`:
 
 ```text
-28 passed, 2 skipped
+C:\Users\mscoo\miniforge3\envs\CGCNN\python.exe -m pytest -q -p no:cacheprovider -p no:anyio --basetemp .pytest_tmp\acceptance-full
+64 passed, 20 warnings in 7.11s
 ```
 
-Focused verification for the implicit-bias checkpoint fallback update:
-
-```text
-C:\Users\mscoo\miniforge3\envs\CGCNN\python.exe -m pytest tests\test_experiment_config.py tests\test_training_cli_config.py --basetemp .codex_tmp_pytest -p no:cacheprovider
-6 passed, 2 warnings
-```
-
-Focused verification for the run-comparison utility:
-
-```text
-C:\Users\mscoo\miniforge3\envs\CGCNN\python.exe -m pytest tests\test_compare_runs.py --basetemp .codex_tmp_pytest -p no:cacheprovider
-3 passed
-```
+On this Windows sandbox, create `.pytest_tmp` before using the command above. The custom
+basetemp and disabled cache plugin avoid permission issues in the default pytest temp and
+cache locations. Normal developer environments can continue to use plain `pytest`.
 
 ### What Is Covered
 
@@ -745,9 +782,15 @@ C:\Users\mscoo\miniforge3\envs\CGCNN\python.exe -m pytest tests\test_compare_run
 - Model-level learnable distance/angle basis forward paths.
 - Implicit-bias activation shape/finite/gradient behavior and zero-lambda equivalence to SiLU.
 - CGCNN and ALIGNN-like forward paths with `readout_type="implicit_bias"`.
+- `GatedGraphConv` implicit-bias edge, message, node, and all-target forward paths.
+- Edge-less graph behavior with implicit bias in `node_mlp`.
+- Finite nonzero convolution gradients with all implicit-bias targets enabled.
+- CGCNN and ALIGNN-like model forwards with convolution implicit bias enabled.
 - Optional `GatedGraphConv` edge-weight shape handling and weighted aggregation behavior.
 - CGCNN and ALIGNN-like `use_edge_weight` opt-in behavior.
 - Training CLI `--use-edge-weight` propagation into model config.
+- Training CLI `conv_` flags, comma-separated targets, and checkpoint model-config
+  metadata propagation for both CGCNN and ALIGNN-like scripts.
 - Checkpoint metadata round trip for implicit-bias CGCNN inference reconstruction.
 - `predict_from_cif.py` smoke coverage for implicit-bias checkpoints loaded from metadata and from explicit legacy fallback CLI arguments.
 - Run-comparison flattening, metric recomputation from `test_predictions.csv`, and sorted CSV output.
@@ -835,6 +878,10 @@ Not applicable.
 - [ ] Add attention or gated pooling as a configurable alternative to mean/sum pooling.
 - [ ] Add Matbench-style dataset adapters and standardized split/evaluation workflows.
 - [x] Add checkpoint round-trip and example-script smoke tests for implicit-bias prediction loading.
+- [x] Add optional implicit-bias hidden activations to selected `GatedGraphConv` MLPs,
+  preserve the edge gate/default behavior, and document the experiment-2 protocol.
+- [ ] Run the documented baseline, target-isolation sequence, and small sweep on a
+  representative dataset; compare validation metrics, timing, and numerical stability.
 - [ ] Add basic classification and multi-task support across dataset, loss, metrics, and readout.
 - [ ] Add first equivariant feature/model experiment using `edge_vec` or `edge_unit_vec`, while preserving current invariant CGCNN/ALIGNN-like baselines.
 - [ ] Add CI with CPU tests, linting, and an optional `pymatgen` test environment.

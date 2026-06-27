@@ -200,7 +200,7 @@ class VoronoiNeighborStrategy:
 
     tol: float = 0.0
     cutoff: float = 10.0
-    allow_pathological: bool = False
+    allow_pathological: bool = True
     name: str = "voronoi"
 
     def build(self, structure: Any) -> NeighborList:
