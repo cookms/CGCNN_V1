@@ -6,7 +6,11 @@ from materials_gnn.data.cache_precompute import (
     precompute_graph_cache,
 )
 from materials_gnn.data.datamodules import make_crystal_dataloaders
-from materials_gnn.data.datasets import CrystalGraphDataset, collate_graphs
+from materials_gnn.data.datasets import (
+    CrystalGraphDataset,
+    GraphConstructionError,
+    collate_graphs,
+)
 from materials_gnn.data.graph_cache import GraphCache
 from materials_gnn.data.graph_stats import (
     GraphStats,
@@ -23,6 +27,7 @@ __all__ = [
     "CachePrecomputeResult",
     "CrystalGraphDataset",
     "GraphCache",
+    "GraphConstructionError",
     "GraphStats",
     "TargetNormalizer",
     "analyze_dataset_graphs",

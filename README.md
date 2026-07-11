@@ -12,6 +12,7 @@ This is a first prototype, not a performance-optimized benchmark implementation.
 - Optionally add normalized elemental descriptors such as electronegativity, group, period, covalent radius, valence electrons, electron affinity, polarizability, magnetic moment, and ionization energy when pymatgen provides the data.
 - Build an ALIGNN-style line graph where directed bonds become nodes and line-graph edges encode bond angles with configurable bases and optional memory caps.
 - Train raw PyTorch CGCNN-style and ALIGNN-like models for scalar regression.
+- Optionally use atom-graph `edge_weight` scalars from weighted graph builders during message aggregation.
 - Use `device=auto`, CUDA batch transfer, optional CUDA mixed precision, and DataLoader pinned memory.
 - Reuse expensive CIF-to-graph preprocessing with RAM, persistent disk graph caching, or an explicit cache-precompute CLI.
 - Use CSV datasets with columns such as `material_id,cif_path,target`.
@@ -68,7 +69,7 @@ Supported strategies:
 | --- | --- | --- |
 | `cutoff` | You want the standard CGCNN-style graph with every periodic neighbor inside a radius. | `cutoff` |
 | `knn` | You want controlled graph size with a fixed number of outgoing neighbors per atom. | `neighbor_kwargs={"k": 12, "max_radius": 8.0}` |
-| `voronoi` | You want coordination based on periodic Voronoi faces rather than a global radius. | `neighbor_kwargs={"cutoff": 10.0, "tol": 0.0}` |
+| `voronoi` | You want coordination based on periodic Voronoi faces rather than a global radius. | `neighbor_kwargs={"cutoff": 10.0, "tol": 0.0, "failure_policy": "raise"}` |
 | `adaptive_shell` | You want an experimental local-shell graph that adapts to each atom's distance gaps. | `neighbor_kwargs={"max_radius": 8.0, "min_neighbors": 4, "max_neighbors": 24}` |
 | `strain_consensus` | You want a speculative robust graph that keeps cutoff edges stable under small virtual lattice strains. | `neighbor_kwargs={"cutoff": 5.0, "strain_epsilon": 0.02, "min_survival_fraction": 0.5}` |
 
@@ -114,7 +115,40 @@ graph = structure_to_bond_graph(
 )
 ```
 
+Voronoi construction is whole-graph and fail-safe by default. If pymatgen raises an
+expected Voronoi/runtime error or returns no neighbors for any center, `failure_policy="raise"`
+raises a contextual `VoronoiNeighborError`; it never returns the edges accumulated for
+only the successful centers. Explicit alternatives are `"empty"`, which returns a correctly
+shaped empty neighbor list, and `"cutoff"`, which rebuilds the complete graph with
+`CutoffNeighborStrategy` using the Voronoi `cutoff`. The example CLIs expose the same choice
+as `--voronoi-failure-policy`, and record it in experiment and graph-cache metadata.
+Dataset graph-build errors add the CSV row index, material ID, CIF path, and neighbor
+strategy while preserving the original exception as the cause.
+
 Custom strategies can implement `build(structure) -> NeighborList` and be passed directly as `neighbor_strategy=my_strategy`. This is the intended path for new graph construction research.
+
+### Optional atom-graph edge weights
+
+Some graph builders, including Voronoi and strain-consensus strategies, may attach an
+optional `edge_weight` tensor to the atom/bond graph. By default the models ignore this
+field, preserving the original unweighted aggregation behavior. To use those weights in
+atom-graph message aggregation, opt in with `use_edge_weight=True`:
+
+```python
+from materials_gnn.models import CGCNNModel
+
+model = CGCNNModel(
+    edge_input_dim=64,
+    hidden_dim=128,
+    use_edge_weight=True,
+)
+```
+
+The same flag is available on `ALIGNNLikeModel`, where it affects only atom/bond graph
+updates. Line-graph edge weighting is not implemented. If `use_edge_weight=True` but a
+graph has no `edge_weight`, the model falls back to the original unweighted aggregation.
+Graph builders are responsible for producing meaningful weights; the model does not
+normalize or clamp user-provided values.
 
 ## Atom, bond, and angle featurization
 
@@ -368,6 +402,17 @@ python examples/train_alignn_like.py \
   --atom-features default
 ```
 
+Use optional atom-graph edge weights from strategies that emit them:
+
+```bash
+python examples/train_alignn_like.py \
+  --csv data/id_prop.csv \
+  --target target \
+  --neighbor-strategy voronoi \
+  --neighbor-max-radius 10.0 \
+  --use-edge-weight
+```
+
 ## Train a CGCNN-style model
 
 ```bash
@@ -377,12 +422,66 @@ python examples/train_cgcnn.py \
   --cutoff 5.0
 ```
 
+For CGCNN-style runs, the same `--use-edge-weight` flag enables weighted atom-graph
+aggregation when the graph contains `edge_weight`.
+
+## Implicit-bias readout experiment
+
+The first implicit-bias experiment leaves graph construction and message passing unchanged
+and only swaps the hidden activation in the final post-pooling readout head.
+
+Baseline CGCNN:
+
+```bash
+python examples/train_cgcnn.py --csv data/id_prop.csv --target target --output-dir runs/cgcnn_baseline
+```
+
+Implicit-bias readout CGCNN:
+
+```bash
+python examples/train_cgcnn.py --csv data/id_prop.csv --target target \
+  --readout-type implicit_bias \
+  --ib-lambda 0.01 \
+  --ib-sigma-slope 1.0 \
+  --ib-fixed-point-iters 8 \
+  --ib-coupling ring \
+  --output-dir runs/cgcnn_ib_readout_lam001
+```
+
+Baseline ALIGNN-like:
+
+```bash
+python examples/train_alignn_like.py --csv data/id_prop.csv --target target --output-dir runs/alignn_baseline
+```
+
+Implicit-bias readout ALIGNN-like:
+
+```bash
+python examples/train_alignn_like.py --csv data/id_prop.csv --target target \
+  --readout-type implicit_bias \
+  --ib-lambda 0.01 \
+  --ib-sigma-slope 1.0 \
+  --ib-fixed-point-iters 8 \
+  --ib-coupling ring \
+  --output-dir runs/alignn_ib_readout_lam001
+```
+
+## Implicit-bias convolution experiment
+
+Experiment 2 moves the optional implicit-bias activation into selected hidden MLPs inside
+`GatedGraphConv` while leaving the edge gate unchanged. See the
+[runnable experiment-2 protocol](docs/implicit_bias_experiments.md) for baseline,
+node-only, message-only, edge-only, all-target, ALIGNN-like, and sweep commands.
+
 ## Predict from a CIF
 
 Training writes `experiment_config.json`, `training_history.json`, `best_model.pt`, and
 `final_model.pt` into the run directory. The JSON config and checkpoint metadata include
 the package version, target column, split seed and indices, model architecture, graph
 strategy, featurization settings, target normalizer, and training CLI arguments.
+Each training-history epoch also records timing fields such as `train_seconds`,
+`val_seconds`, `epoch_seconds`, `elapsed_seconds`, and train throughput estimates, so
+architectural changes can be compared on speed as well as metrics.
 
 The checkpoints also retain top-level inference metadata, so prediction can reconstruct
 the model architecture plus CIF-to-graph settings such as cutoff, neighbor strategy,
@@ -396,7 +495,52 @@ python examples/predict_from_cif.py \
 ```
 
 For older checkpoints that do not contain config metadata, keep passing the model and
-graph flags explicitly, or add `--ignore-checkpoint-config` to force CLI settings.
+graph flags explicitly, or add `--ignore-checkpoint-config` to force CLI settings. This
+fallback path also supports optional edge weighting and implicit-bias readout flags, so
+legacy implicit-bias checkpoints can be reconstructed when the CLI arguments match the
+training architecture:
+
+```bash
+python examples/predict_from_cif.py \
+  --checkpoint runs/cgcnn_ib_readout_lam001/best_model.pt \
+  --cif data/cifs/Si.cif \
+  --model cgcnn \
+  --num-rbf 64 \
+  --hidden-dim 128 \
+  --num-layers 3 \
+  --readout-type implicit_bias \
+  --ib-lambda 0.01 \
+  --ib-sigma-slope 1.0 \
+  --ib-fixed-point-iters 8 \
+  --ib-coupling ring
+```
+
+Add `--ib-trainable-lambda` and `--use-edge-weight` when those options were used during
+training.
+
+## Compare training runs
+
+Use `examples/compare_runs.py` to flatten completed run directories into one sortable
+table. It reads `experiment_config.json`, `training_history.json`, and
+`test_predictions.csv`, then reports readout parameters, validation metrics, recomputed
+test MAE/RMSE/R2, and timing fields.
+
+```bash
+python examples/compare_runs.py \
+  --root runs \
+  --output-csv runs/run_comparison.csv \
+  --group-by readout_type
+```
+
+Compare only selected runs:
+
+```bash
+python examples/compare_runs.py \
+  runs/cgcnn_baseline \
+  runs/cgcnn_ib_readout_lam001 \
+  --sort-by test_mae \
+  --output-csv runs/cgcnn_readout_comparison.csv
+```
 
 ## Core graph fields
 
@@ -422,6 +566,9 @@ Strategies such as Voronoi or adaptive shells may also attach:
     "edge_weight": geometric_edge_weights,  # [num_edges]
 }
 ```
+
+`edge_weight` is optional. `CGCNNModel` and `ALIGNNLikeModel` consume it only when
+constructed with `use_edge_weight=True` or trained with `--use-edge-weight`.
 
 An ALIGNN-like graph additionally contains:
 

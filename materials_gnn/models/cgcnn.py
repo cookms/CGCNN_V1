@@ -19,7 +19,7 @@ from torch import Tensor, nn
 from materials_gnn.featurization.basis import ScalarBasisExpansion, make_basis_expansion
 from materials_gnn.featurization.elemental_features import AtomFeatureEncoder
 from materials_gnn.models.layers import GatedGraphConv
-from materials_gnn.models.readout import MLPReadout, pool_nodes
+from materials_gnn.models.readout import make_readout, pool_nodes
 
 
 class CGCNNModel(nn.Module):
@@ -56,9 +56,24 @@ class CGCNNModel(nn.Module):
         distance_basis_start: float = 0.0,
         distance_basis_cutoff: float = 5.0,
         distance_basis_kwargs: Mapping[str, Any] | None = None,
+        readout_type: str = "mlp",
+        ib_lambda: float = 0.01,
+        ib_sigma_slope: float = 1.0,
+        ib_fixed_point_iters: int = 8,
+        ib_coupling: str = "ring",
+        ib_trainable_lambda: bool = False,
+        use_edge_weight: bool = False,
+        conv_activation_type: str = "silu",
+        conv_ib_lambda: float = 0.01,
+        conv_ib_sigma_slope: float = 1.0,
+        conv_ib_fixed_point_iters: int = 8,
+        conv_ib_coupling: str = "ring",
+        conv_ib_trainable_lambda: bool = False,
+        conv_ib_targets: Sequence[str] | str = (),
     ) -> None:
         super().__init__()
         self.pooling = pooling
+        self.use_edge_weight = use_edge_weight
         self.atom_embedding = AtomFeatureEncoder(
             hidden_dim,
             max_atomic_number=max_atomic_number,
@@ -77,10 +92,33 @@ class CGCNNModel(nn.Module):
                 **dict(distance_basis_kwargs or {}),
             )
         self.bond_embedding = nn.Sequential(nn.Linear(edge_input_dim, hidden_dim), nn.SiLU())
+        conv_kwargs = {
+            "dropout": dropout,
+            "conv_activation_type": conv_activation_type,
+            "conv_ib_lambda": conv_ib_lambda,
+            "conv_ib_sigma_slope": conv_ib_sigma_slope,
+            "conv_ib_fixed_point_iters": conv_ib_fixed_point_iters,
+            "conv_ib_coupling": conv_ib_coupling,
+            "conv_ib_trainable_lambda": conv_ib_trainable_lambda,
+            "conv_ib_targets": conv_ib_targets,
+        }
         self.convs = nn.ModuleList(
-            [GatedGraphConv(hidden_dim, hidden_dim, dropout=dropout) for _ in range(num_layers)]
+            [GatedGraphConv(hidden_dim, hidden_dim, **conv_kwargs) for _ in range(num_layers)]
         )
-        self.readout = MLPReadout(hidden_dim, output_dim, hidden_dim=hidden_dim, dropout=dropout)
+        self.readout = make_readout(
+            readout_type,
+            hidden_dim,
+            output_dim,
+            hidden_dim=hidden_dim,
+            dropout=dropout,
+            ib_kwargs={
+                "ib_lambda": ib_lambda,
+                "sigma_slope": ib_sigma_slope,
+                "fixed_point_iters": ib_fixed_point_iters,
+                "coupling": ib_coupling,
+                "trainable_lambda": ib_trainable_lambda,
+            },
+        )
 
     def _edge_features(self, graph: Mapping[str, Tensor | int], *, device: torch.device, dtype: torch.dtype) -> Tensor:
         if self.distance_basis is None:
@@ -108,9 +146,10 @@ class CGCNNModel(nn.Module):
         e = self.bond_embedding(self._edge_features(graph, device=h.device, dtype=h.dtype))
         edge_index = edge_index.to(device=h.device)
         batch_tensor = batch.to(device=h.device) if isinstance(batch, Tensor) else None
+        edge_weight = graph.get("edge_weight") if self.use_edge_weight else None
 
         for conv in self.convs:
-            h, e = conv(h, edge_index, e)
+            h, e = conv(h, edge_index, e, edge_weight=edge_weight)  # type: ignore[arg-type]
 
         crystal_embedding = pool_nodes(h, batch_tensor, mode=self.pooling)
         prediction = self.readout(crystal_embedding)

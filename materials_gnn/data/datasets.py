@@ -16,6 +16,10 @@ from materials_gnn.featurization.crystal_graph import structure_to_bond_graph
 from materials_gnn.featurization.line_graph import add_line_graph
 
 
+class GraphConstructionError(RuntimeError):
+    """Graph-build failure annotated with the originating dataset row and structure."""
+
+
 class CrystalGraphDataset(Dataset):
     """CSV-backed dataset for CIF-to-graph supervised learning.
 
@@ -59,7 +63,12 @@ class CrystalGraphDataset(Dataset):
         self.id_column = id_column
         self.cutoff = cutoff
         self.neighbor_strategy = neighbor_strategy
-        self.neighbor_kwargs = neighbor_kwargs or {}
+        self.neighbor_kwargs = dict(neighbor_kwargs or {})
+        if isinstance(neighbor_strategy, str) and neighbor_strategy.lower().strip() == "voronoi":
+            # Keep the topology-changing policy explicit in cache identities. This also
+            # prevents legacy cached empty/partial Voronoi graphs from being reused under
+            # the new fail-safe default.
+            self.neighbor_kwargs.setdefault("failure_policy", "raise")
         self.rbf_cutoff = rbf_cutoff
         self.graph_kwargs = graph_kwargs or {}
         self.include_line_graph = include_line_graph
@@ -185,17 +194,29 @@ class CrystalGraphDataset(Dataset):
                     self._graph_cache[index] = legacy_graph
                 return legacy_graph
 
-        structure = self._load_structure(cif_path)
-        graph = structure_to_bond_graph(
-            structure,
-            cutoff=self.cutoff,
-            rbf_cutoff=self.rbf_cutoff,
-            neighbor_strategy=self.neighbor_strategy,
-            neighbor_kwargs=self.neighbor_kwargs,
-            **self.graph_kwargs,
-        )
-        if self.include_line_graph:
-            graph = add_line_graph(graph, **self.line_graph_kwargs)
+        try:
+            structure = self._load_structure(cif_path)
+            graph = structure_to_bond_graph(
+                structure,
+                cutoff=self.cutoff,
+                rbf_cutoff=self.rbf_cutoff,
+                neighbor_strategy=self.neighbor_strategy,
+                neighbor_kwargs=self.neighbor_kwargs,
+                **self.graph_kwargs,
+            )
+            if self.include_line_graph:
+                graph = add_line_graph(graph, **self.line_graph_kwargs)
+        except Exception as exc:
+            material_id = str(row[self.id_column])
+            strategy = self.neighbor_strategy
+            if strategy is not None and not isinstance(strategy, str):
+                strategy = f"{strategy.__class__.__module__}.{strategy.__class__.__qualname__}"
+            raise GraphConstructionError(
+                "Failed to construct graph for "
+                f"dataset row {index}, material_id={material_id!r}, "
+                f"cif_path={cif_path}, neighbor_strategy={strategy!r}: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
 
         if self.graph_cache is not None and cache_key is not None:
             self.graph_cache.save(cache_key, graph, metadata=cache_metadata)

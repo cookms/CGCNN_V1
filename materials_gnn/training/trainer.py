@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Mapping
@@ -130,6 +131,23 @@ def _make_grad_scaler(enabled: bool):
         return torch.amp.GradScaler("cuda", enabled=enabled)
     except (AttributeError, TypeError):  # pragma: no cover - compatibility with older torch
         return torch.cuda.amp.GradScaler(enabled=enabled)
+
+
+def _sync_if_cuda(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+
+def _safe_len(value: Any) -> int | None:
+    try:
+        return len(value)
+    except TypeError:
+        return None
+
+
+def _loader_num_samples(loader: DataLoader) -> int | None:
+    dataset = getattr(loader, "dataset", None)
+    return _safe_len(dataset) if dataset is not None else None
 
 
 @torch.no_grad()
@@ -341,11 +359,17 @@ def train_model(
     scaler = _make_grad_scaler(_amp_enabled(resolved_device, mixed_precision))
     history: list[dict[str, Any]] = []
     best_val_mae = float("inf")
+    train_samples = _loader_num_samples(train_loader)
+    train_batches = _safe_len(train_loader)
+    training_start = time.perf_counter()
 
     if verbose:
         print(f"training device: {describe_device(resolved_device)}")
 
     for epoch in range(1, epochs + 1):
+        _sync_if_cuda(resolved_device)
+        epoch_start = time.perf_counter()
+        train_start = epoch_start
         train_loss = train_one_epoch(
             model,
             train_loader,
@@ -359,9 +383,23 @@ def train_model(
             check_finite=check_finite,
             detect_anomaly=detect_anomaly,
         )
-        record: dict[str, Any] = {"epoch": epoch, "train_loss": train_loss}
+        _sync_if_cuda(resolved_device)
+        train_seconds = time.perf_counter() - train_start
+        record: dict[str, Any] = {
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "train_seconds": train_seconds,
+        }
+        if train_samples is not None:
+            record["train_samples"] = train_samples
+            record["train_samples_per_second"] = train_samples / train_seconds if train_seconds > 0 else float("inf")
+        if train_batches is not None:
+            record["train_batches"] = train_batches
+            record["train_batches_per_second"] = train_batches / train_seconds if train_seconds > 0 else float("inf")
 
         if val_loader is not None:
+            _sync_if_cuda(resolved_device)
+            val_start = time.perf_counter()
             val_metrics = evaluate_model(
                 model,
                 val_loader,
@@ -372,7 +410,12 @@ def train_model(
                 non_blocking=non_blocking,
                 check_finite=check_finite,
             )
+            _sync_if_cuda(resolved_device)
+            record["val_seconds"] = time.perf_counter() - val_start
             record.update({f"val_{key}": value for key, value in val_metrics.items() if key not in {"y_true", "y_pred", "material_id"}})
+            _sync_if_cuda(resolved_device)
+            record["epoch_seconds"] = time.perf_counter() - epoch_start
+            record["elapsed_seconds"] = time.perf_counter() - training_start
 
             if val_metrics["mae"] < best_val_mae:
                 best_val_mae = float(val_metrics["mae"])
@@ -390,6 +433,10 @@ def train_model(
                         checkpoint_path,
                     )
 
+        if "epoch_seconds" not in record:
+            _sync_if_cuda(resolved_device)
+            record["epoch_seconds"] = time.perf_counter() - epoch_start
+            record["elapsed_seconds"] = time.perf_counter() - training_start
         history.append(record)
         if verbose:
             msg = f"epoch={epoch:03d} train_loss={train_loss:.5f}"
@@ -399,6 +446,9 @@ def train_model(
                     f" val_rmse={record['val_rmse']:.5f}"
                     f" val_r2={record['val_r2']:.4f}"
                 )
+            msg += f" time={record['epoch_seconds']:.2f}s"
+            if "train_samples_per_second" in record:
+                msg += f" train_samples/s={record['train_samples_per_second']:.2f}"
             print(msg)
 
     if final_checkpoint_path is not None:

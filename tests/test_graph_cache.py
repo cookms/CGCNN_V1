@@ -3,10 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
+import pytest
 import torch
 
 import materials_gnn.data.datasets as dataset_module
-from materials_gnn.data.datasets import CrystalGraphDataset
+from materials_gnn.data.datasets import CrystalGraphDataset, GraphConstructionError
 from materials_gnn.data.graph_cache import GraphCache, stable_hash
 
 
@@ -110,3 +111,55 @@ def test_graph_cache_ignores_target_column_and_material_id(tmp_path: Path, monke
     assert calls["count"] == 1
 
     assert first.graph_cache_key(0) == second.graph_cache_key(0)
+
+
+def test_voronoi_failure_policy_is_explicit_in_cache_identity(tmp_path: Path) -> None:
+    cif_path = tmp_path / "toy.cif"
+    cif_path.write_text("cache identity only\n")
+    csv_path = tmp_path / "id_prop.csv"
+    pd.DataFrame(
+        {"material_id": ["toy"], "cif_path": [cif_path.name], "target": [1.0]}
+    ).to_csv(csv_path, index=False)
+
+    default = CrystalGraphDataset(
+        csv_path,
+        neighbor_strategy="voronoi",
+        graph_cache_dir=tmp_path / "cache",
+    )
+    empty = CrystalGraphDataset(
+        csv_path,
+        neighbor_strategy="voronoi",
+        neighbor_kwargs={"failure_policy": "empty"},
+        graph_cache_dir=tmp_path / "cache",
+    )
+
+    assert default.neighbor_kwargs["failure_policy"] == "raise"
+    assert default._cache_identity(0, cif_path)["neighbor_kwargs"]["failure_policy"] == "raise"
+    assert default.graph_cache_key(0) != empty.graph_cache_key(0)
+
+
+def test_dataset_graph_failure_identifies_problem_structure(tmp_path: Path, monkeypatch) -> None:
+    cif_path = tmp_path / "broken.cif"
+    cif_path.write_text("not a valid structure\n")
+    csv_path = tmp_path / "id_prop.csv"
+    pd.DataFrame(
+        {"material_id": ["problem-42"], "cif_path": [cif_path.name], "target": [1.0]}
+    ).to_csv(csv_path, index=False)
+
+    def fail_graph_construction(structure, **kwargs):
+        raise ValueError("synthetic Voronoi failure")
+
+    monkeypatch.setattr(dataset_module, "structure_to_bond_graph", fail_graph_construction)
+    monkeypatch.setattr(CrystalGraphDataset, "_load_structure", lambda self, path: object())
+    dataset = CrystalGraphDataset(csv_path, neighbor_strategy="voronoi")
+
+    with pytest.raises(GraphConstructionError) as exc_info:
+        _ = dataset[0]
+
+    message = str(exc_info.value)
+    assert "dataset row 0" in message
+    assert "material_id='problem-42'" in message
+    assert f"cif_path={cif_path}" in message
+    assert "neighbor_strategy='voronoi'" in message
+    assert "ValueError: synthetic Voronoi failure" in message
+    assert isinstance(exc_info.value.__cause__, ValueError)

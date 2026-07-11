@@ -23,6 +23,22 @@ from materials_gnn.training import dataloader_device_kwargs, evaluate_model, res
 from materials_gnn.utils import write_experiment_config
 
 
+_VALID_CONV_IB_TARGETS = {"edge", "message", "node", "all"}
+
+
+def _parse_csv_targets(value: str) -> tuple[str, ...]:
+    if not value:
+        return ()
+    targets = tuple(part.strip().lower() for part in value.split(",") if part.strip())
+    invalid = sorted(set(targets) - _VALID_CONV_IB_TARGETS)
+    if invalid:
+        raise ValueError(
+            "--conv-ib-targets must contain only edge, message, node, or all; "
+            f"got {invalid}"
+        )
+    return targets
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train an ALIGNN-like crystal GNN")
     parser.add_argument("--csv", required=True, help="CSV with material_id,cif_path,target columns")
@@ -36,12 +52,23 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--neighbor-k", type=int, default=12, help="K for --neighbor-strategy knn")
     parser.add_argument("--neighbor-max-radius", type=float, default=None, help="Search radius for knn/voronoi/adaptive_shell")
+    parser.add_argument(
+        "--voronoi-failure-policy",
+        choices=["raise", "empty", "cutoff"],
+        default="raise",
+        help="Whole-graph policy when Voronoi construction fails or any atom has no neighbors",
+    )
     parser.add_argument("--rbf-cutoff", type=float, default=None, help="Final distance RBF center; fixed across the dataset")
     parser.add_argument("--strain-epsilon", type=float, default=0.02, help="Virtual strain size for strain_consensus")
     parser.add_argument("--min-survival-fraction", type=float, default=0.5, help="Minimum edge survival for strain_consensus")
     parser.add_argument("--num-rbf", type=int, default=64, help="Distance basis size")
     parser.add_argument("--distance-basis", choices=["gaussian", "bessel", "fourier"], default="gaussian", help="Static preprocessing basis for bond distances")
     parser.add_argument("--learnable-distance-basis", action="store_true", help="Use a trainable Gaussian distance basis inside the model")
+    parser.add_argument(
+        "--use-edge-weight",
+        action="store_true",
+        help="Use optional graph['edge_weight'] scalars to weight atom-graph message aggregation.",
+    )
     parser.add_argument("--atom-features", default="", help="Comma-separated elemental descriptors or 'default'")
     parser.add_argument("--num-angle-rbf", type=int, default=32, help="Angle basis size")
     parser.add_argument("--angle-basis", choices=["gaussian", "bessel", "fourier"], default="gaussian", help="Static preprocessing basis for bond angles")
@@ -65,6 +92,19 @@ def parse_args() -> argparse.Namespace:
         default="nearest",
         help="How to choose line-graph outgoing bonds when --max-line-neighbors is set",
     )
+    parser.add_argument("--readout-type", choices=["mlp", "implicit_bias"], default="mlp")
+    parser.add_argument("--ib-lambda", type=float, default=0.01)
+    parser.add_argument("--ib-sigma-slope", type=float, default=1.0)
+    parser.add_argument("--ib-fixed-point-iters", type=int, default=8)
+    parser.add_argument("--ib-coupling", choices=["ring", "dense"], default="ring")
+    parser.add_argument("--ib-trainable-lambda", action="store_true")
+    parser.add_argument("--conv-activation-type", choices=["silu", "implicit_bias"], default="silu")
+    parser.add_argument("--conv-ib-lambda", type=float, default=0.01)
+    parser.add_argument("--conv-ib-sigma-slope", type=float, default=1.0)
+    parser.add_argument("--conv-ib-fixed-point-iters", type=int, default=8)
+    parser.add_argument("--conv-ib-coupling", choices=["ring", "dense"], default="ring")
+    parser.add_argument("--conv-ib-trainable-lambda", action="store_true")
+    parser.add_argument("--conv-ib-targets", type=str, default="")
     parser.add_argument("--hidden-dim", type=int, default=128)
     parser.add_argument("--num-layers", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=16)
@@ -95,7 +135,7 @@ def _neighbor_kwargs_from_args(args: argparse.Namespace) -> dict[str, object]:
             kwargs["max_radius"] = args.neighbor_max_radius
         return kwargs
     if args.neighbor_strategy == "voronoi":
-        kwargs = {}
+        kwargs = {"failure_policy": args.voronoi_failure_policy}
         if args.neighbor_max_radius is not None:
             kwargs["cutoff"] = args.neighbor_max_radius
         return kwargs
@@ -151,8 +191,22 @@ def _model_config_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "atom_feature_names": args.atom_features or None,
         "distance_basis_type": "learnable_gaussian" if args.learnable_distance_basis else None,
         "distance_basis_cutoff": _rbf_cutoff_from_args(args) or args.cutoff,
+        "use_edge_weight": args.use_edge_weight,
         "angle_basis_type": "learnable_gaussian" if args.learnable_angle_basis else None,
         "angle_basis_use_cosine": args.angle_basis_use_cosine,
+        "readout_type": args.readout_type,
+        "ib_lambda": args.ib_lambda,
+        "ib_sigma_slope": args.ib_sigma_slope,
+        "ib_fixed_point_iters": args.ib_fixed_point_iters,
+        "ib_coupling": args.ib_coupling,
+        "ib_trainable_lambda": args.ib_trainable_lambda,
+        "conv_activation_type": args.conv_activation_type,
+        "conv_ib_lambda": args.conv_ib_lambda,
+        "conv_ib_sigma_slope": args.conv_ib_sigma_slope,
+        "conv_ib_fixed_point_iters": args.conv_ib_fixed_point_iters,
+        "conv_ib_coupling": args.conv_ib_coupling,
+        "conv_ib_trainable_lambda": args.conv_ib_trainable_lambda,
+        "conv_ib_targets": _parse_csv_targets(args.conv_ib_targets),
     }
 
 

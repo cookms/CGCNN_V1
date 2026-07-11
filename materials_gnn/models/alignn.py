@@ -21,7 +21,7 @@ from torch import Tensor, nn
 from materials_gnn.featurization.basis import ScalarBasisExpansion, make_basis_expansion
 from materials_gnn.featurization.elemental_features import AtomFeatureEncoder
 from materials_gnn.models.layers import GatedGraphConv
-from materials_gnn.models.readout import MLPReadout, pool_nodes
+from materials_gnn.models.readout import make_readout, pool_nodes
 
 
 class ALIGNNLikeModel(nn.Module):
@@ -49,9 +49,24 @@ class ALIGNNLikeModel(nn.Module):
         angle_basis_type: str | None = None,
         angle_basis_use_cosine: bool = False,
         angle_basis_kwargs: Mapping[str, Any] | None = None,
+        readout_type: str = "mlp",
+        ib_lambda: float = 0.01,
+        ib_sigma_slope: float = 1.0,
+        ib_fixed_point_iters: int = 8,
+        ib_coupling: str = "ring",
+        ib_trainable_lambda: bool = False,
+        use_edge_weight: bool = False,
+        conv_activation_type: str = "silu",
+        conv_ib_lambda: float = 0.01,
+        conv_ib_sigma_slope: float = 1.0,
+        conv_ib_fixed_point_iters: int = 8,
+        conv_ib_coupling: str = "ring",
+        conv_ib_trainable_lambda: bool = False,
+        conv_ib_targets: Sequence[str] | str = (),
     ) -> None:
         super().__init__()
         self.pooling = pooling
+        self.use_edge_weight = use_edge_weight
         self.angle_basis_use_cosine = angle_basis_use_cosine
         self.atom_embedding = AtomFeatureEncoder(
             hidden_dim,
@@ -88,13 +103,36 @@ class ALIGNNLikeModel(nn.Module):
 
         # In the line graph, bond representations e are nodes and angle representations t
         # are edges. The same edge-gated convolution can update (bond, angle) states.
+        conv_kwargs = {
+            "dropout": dropout,
+            "conv_activation_type": conv_activation_type,
+            "conv_ib_lambda": conv_ib_lambda,
+            "conv_ib_sigma_slope": conv_ib_sigma_slope,
+            "conv_ib_fixed_point_iters": conv_ib_fixed_point_iters,
+            "conv_ib_coupling": conv_ib_coupling,
+            "conv_ib_trainable_lambda": conv_ib_trainable_lambda,
+            "conv_ib_targets": conv_ib_targets,
+        }
         self.line_convs = nn.ModuleList(
-            [GatedGraphConv(hidden_dim, hidden_dim, dropout=dropout) for _ in range(num_layers)]
+            [GatedGraphConv(hidden_dim, hidden_dim, **conv_kwargs) for _ in range(num_layers)]
         )
         self.bond_convs = nn.ModuleList(
-            [GatedGraphConv(hidden_dim, hidden_dim, dropout=dropout) for _ in range(num_layers)]
+            [GatedGraphConv(hidden_dim, hidden_dim, **conv_kwargs) for _ in range(num_layers)]
         )
-        self.readout = MLPReadout(hidden_dim, output_dim, hidden_dim=hidden_dim, dropout=dropout)
+        self.readout = make_readout(
+            readout_type,
+            hidden_dim,
+            output_dim,
+            hidden_dim=hidden_dim,
+            dropout=dropout,
+            ib_kwargs={
+                "ib_lambda": ib_lambda,
+                "sigma_slope": ib_sigma_slope,
+                "fixed_point_iters": ib_fixed_point_iters,
+                "coupling": ib_coupling,
+                "trainable_lambda": ib_trainable_lambda,
+            },
+        )
 
     def _edge_features(self, graph: Mapping[str, Tensor | int], *, device: torch.device, dtype: torch.dtype) -> Tensor:
         if self.distance_basis is None:
@@ -142,12 +180,13 @@ class ALIGNNLikeModel(nn.Module):
         e = self.bond_embedding(self._edge_features(graph, device=device, dtype=dtype))
         t = self.angle_embedding(self._angle_features(graph, device=device, dtype=dtype))
         batch_tensor = batch.to(device=device) if isinstance(batch, Tensor) else None
+        edge_weight = graph.get("edge_weight") if self.use_edge_weight else None
 
         for line_conv, bond_conv in zip(self.line_convs, self.bond_convs, strict=True):
             # Bonds are nodes in the line graph; angles are line-graph edges.
             e, t = line_conv(e, line_edge_index, t)
             # Updated bonds then mediate atom-graph message passing.
-            h, e = bond_conv(h, edge_index, e)
+            h, e = bond_conv(h, edge_index, e, edge_weight=edge_weight)  # type: ignore[arg-type]
 
         crystal_embedding = pool_nodes(h, batch_tensor, mode=self.pooling)
         prediction = self.readout(crystal_embedding)
