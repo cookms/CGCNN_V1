@@ -10,7 +10,7 @@ preprocessing detail.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -72,6 +72,13 @@ class NeighborStrategy(Protocol):
 
     def build(self, structure: Any) -> NeighborList:
         """Return directed periodic neighbors for a ``pymatgen.Structure``."""
+
+
+class VoronoiNeighborError(RuntimeError):
+    """Raised when pymatgen cannot construct a complete Voronoi neighbor graph."""
+
+
+VoronoiFailurePolicy = Literal["raise", "empty", "cutoff"]
 
 
 def _call_get_neighbor_list(structure: Any, cutoff: float, *, exclude_self: bool = True) -> NeighborList:
@@ -196,20 +203,96 @@ class VoronoiNeighborStrategy:
     chemistry-aware notion of coordination than a global cutoff, especially when bond
     lengths vary strongly across elements or oxidation states. The returned ``weights`` are
     normalized Voronoi face weights from pymatgen when available.
+
+    ``failure_policy`` applies to both pymatgen Voronoi failures and any center atom for
+    which pymatgen returns no neighbors. The default, ``"raise"``, rejects the whole graph
+    with contextual diagnostics. ``"empty"`` returns ``NeighborList.empty()`` and
+    ``"cutoff"`` rebuilds the whole graph with ``CutoffNeighborStrategy``. A partially
+    constructed Voronoi graph is never returned.
     """
 
     tol: float = 0.0
     cutoff: float = 10.0
     allow_pathological: bool = True
     name: str = "voronoi"
+    failure_policy: VoronoiFailurePolicy = "raise"
+
+    def _handle_failure(
+        self,
+        structure: Any,
+        *,
+        atom_index: int,
+        detail: str,
+        cause: Exception | None = None,
+    ) -> NeighborList:
+        structure_size = len(structure)
+        message = (
+            "Voronoi neighbor construction failed for "
+            f"atom index {atom_index} in structure size {structure_size} "
+            f"(cutoff={self.cutoff}, tolerance={self.tol}, "
+            f"allow_pathological={self.allow_pathological}): {detail}. "
+            "No partial Voronoi graph was returned."
+        )
+        if self.failure_policy == "empty":
+            return NeighborList.empty()
+        if self.failure_policy == "cutoff":
+            return CutoffNeighborStrategy(cutoff=self.cutoff).build(structure)
+
+        error = VoronoiNeighborError(message)
+        if cause is not None:
+            raise error from cause
+        raise error
 
     def build(self, structure: Any) -> NeighborList:
+        if self.cutoff <= 0:
+            raise ValueError("cutoff must be positive")
+        if self.failure_policy not in {"raise", "empty", "cutoff"}:
+            raise ValueError("failure_policy must be one of: raise, empty, cutoff")
+
         try:
             from pymatgen.analysis.local_env import VoronoiNN
         except ImportError as exc:  # pragma: no cover - dependency guard
             raise ImportError("VoronoiNeighborStrategy requires pymatgen") from exc
 
-        nn_finder = VoronoiNN(tol=self.tol, cutoff=self.cutoff, allow_pathological=self.allow_pathological)
+        nn_finder = VoronoiNN(
+            tol=self.tol,
+            cutoff=self.cutoff,
+            allow_pathological=self.allow_pathological,
+        )
+        nn_info_by_center: list[list[dict[str, Any]]] = []
+        missing_centers: list[int] = []
+        structure_size = len(structure)
+        for center in range(structure_size):
+            try:
+                center_info = list(nn_finder.get_nn_info(structure, center))
+            except (RuntimeError, ValueError) as exc:
+                return self._handle_failure(
+                    structure,
+                    atom_index=center,
+                    detail=(
+                        "pymatgen VoronoiNN.get_nn_info() raised "
+                        f"{type(exc).__name__}: {exc}"
+                    ),
+                    cause=exc,
+                )
+            nn_info_by_center.append(center_info)
+            if not center_info:
+                missing_centers.append(center)
+
+        if missing_centers:
+            if len(missing_centers) == structure_size:
+                detail = "pymatgen VoronoiNN.get_nn_info() returned no neighbors for every atom"
+            else:
+                detail = (
+                    "pymatgen VoronoiNN.get_nn_info() returned no neighbors for "
+                    f"atom index {missing_centers[0]}"
+                )
+            return self._handle_failure(
+                structure,
+                atom_index=missing_centers[0],
+                detail=detail,
+            )
+
         centers: list[int] = []
         neighbors: list[int] = []
         images: list[np.ndarray] = []
@@ -220,8 +303,8 @@ class VoronoiNeighborStrategy:
         cart_coords = np.asarray(structure.cart_coords, dtype=float)
         lattice_matrix = np.asarray(structure.lattice.matrix, dtype=float)
 
-        for center in range(len(structure)):
-            for info in nn_finder.get_nn_info(structure, center):
+        for center, center_info in enumerate(nn_info_by_center):
+            for info in center_info:
                 neighbor_index = int(info.get("site_index"))
                 image = info.get("image")
                 site = info.get("site")
@@ -241,7 +324,7 @@ class VoronoiNeighborStrategy:
                 distances.append(float(np.linalg.norm(displacement)))
                 weights.append(float(info.get("weight", 1.0)))
 
-        if not centers:
+        if not centers:  # Only possible for an empty structure; nonempty failures are handled above.
             return NeighborList.empty()
         return NeighborList(
             center_indices=np.asarray(centers, dtype=np.int64),
@@ -486,6 +569,7 @@ def make_neighbor_strategy(
     strategy: str | NeighborStrategy | None,
     *,
     cutoff: float = 5.0,
+    strategy_kwargs: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> NeighborStrategy:
     """Create a neighbor strategy from a string name or return a custom object.
@@ -495,11 +579,23 @@ def make_neighbor_strategy(
             to ``CutoffNeighborStrategy(cutoff=cutoff)`` for backward compatibility.
         cutoff: Default cutoff used by the cutoff strategy and as a sensible minimum radius
             for KNN when the caller does not supply explicit values.
-        **kwargs: Strategy-specific constructor arguments.
+        strategy_kwargs: Strategy-specific constructor arguments supplied as a mapping.
+            Use this form when an option such as ``cutoff`` has the same name as a factory
+            argument.
+        **kwargs: Additional strategy-specific constructor arguments. These must not
+            duplicate keys in ``strategy_kwargs``.
     """
 
+    constructor_kwargs = dict(strategy_kwargs or {})
+    duplicate_keys = constructor_kwargs.keys() & kwargs.keys()
+    if duplicate_keys:
+        duplicates = ", ".join(sorted(duplicate_keys))
+        raise TypeError(f"Strategy arguments provided more than once: {duplicates}")
+    constructor_kwargs.update(kwargs)
+
     if strategy is None:
-        return CutoffNeighborStrategy(cutoff=cutoff, **kwargs)
+        constructor_kwargs.setdefault("cutoff", cutoff)
+        return CutoffNeighborStrategy(**constructor_kwargs)
     if not isinstance(strategy, str):
         if not isinstance(strategy, NeighborStrategy):
             raise TypeError("Custom neighbor_strategy must implement build(structure) -> NeighborList")
@@ -512,12 +608,12 @@ def make_neighbor_strategy(
 
     cls = _STRATEGY_ALIASES[key]
     if cls is CutoffNeighborStrategy:
-        kwargs.setdefault("cutoff", cutoff)
+        constructor_kwargs.setdefault("cutoff", cutoff)
     elif cls is KNearestNeighborStrategy:
-        kwargs.setdefault("min_radius", cutoff)
-        kwargs.setdefault("max_radius", max(8.0, cutoff))
+        constructor_kwargs.setdefault("min_radius", cutoff)
+        constructor_kwargs.setdefault("max_radius", max(8.0, cutoff))
     elif cls is AdaptiveShellNeighborStrategy:
-        kwargs.setdefault("max_radius", max(8.0, cutoff))
+        constructor_kwargs.setdefault("max_radius", max(8.0, cutoff))
     elif cls is StrainJitterConsensusNeighborStrategy:
-        kwargs.setdefault("cutoff", cutoff)
-    return cls(**kwargs)  # type: ignore[return-value]
+        constructor_kwargs.setdefault("cutoff", cutoff)
+    return cls(**constructor_kwargs)  # type: ignore[return-value]

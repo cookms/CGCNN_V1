@@ -31,6 +31,8 @@ from materials_gnn.featurization.neighbor_strategies import (
     NeighborList,
     NeighborStrategy,
     StrainJitterConsensusNeighborStrategy,
+    VoronoiFailurePolicy,
+    VoronoiNeighborError,
     VoronoiNeighborStrategy,
     make_neighbor_strategy,
 )
@@ -53,6 +55,8 @@ __all__ = [
     "RBFExpansion",
     "ScalarBasisExpansion",
     "StrainJitterConsensusNeighborStrategy",
+    "VoronoiFailurePolicy",
+    "VoronoiNeighborError",
     "VoronoiNeighborStrategy",
     "add_line_graph",
     "angle_basis_expansion",

@@ -69,7 +69,7 @@ Supported strategies:
 | --- | --- | --- |
 | `cutoff` | You want the standard CGCNN-style graph with every periodic neighbor inside a radius. | `cutoff` |
 | `knn` | You want controlled graph size with a fixed number of outgoing neighbors per atom. | `neighbor_kwargs={"k": 12, "max_radius": 8.0}` |
-| `voronoi` | You want coordination based on periodic Voronoi faces rather than a global radius. | `neighbor_kwargs={"cutoff": 10.0, "tol": 0.0}` |
+| `voronoi` | You want coordination based on periodic Voronoi faces rather than a global radius. | `neighbor_kwargs={"cutoff": 10.0, "tol": 0.0, "failure_policy": "raise"}` |
 | `adaptive_shell` | You want an experimental local-shell graph that adapts to each atom's distance gaps. | `neighbor_kwargs={"max_radius": 8.0, "min_neighbors": 4, "max_neighbors": 24}` |
 | `strain_consensus` | You want a speculative robust graph that keeps cutoff edges stable under small virtual lattice strains. | `neighbor_kwargs={"cutoff": 5.0, "strain_epsilon": 0.02, "min_survival_fraction": 0.5}` |
 
@@ -114,6 +114,16 @@ graph = structure_to_bond_graph(
     neighbor_kwargs={"strain_epsilon": 0.02, "min_survival_fraction": 0.5},
 )
 ```
+
+Voronoi construction is whole-graph and fail-safe by default. If pymatgen raises an
+expected Voronoi/runtime error or returns no neighbors for any center, `failure_policy="raise"`
+raises a contextual `VoronoiNeighborError`; it never returns the edges accumulated for
+only the successful centers. Explicit alternatives are `"empty"`, which returns a correctly
+shaped empty neighbor list, and `"cutoff"`, which rebuilds the complete graph with
+`CutoffNeighborStrategy` using the Voronoi `cutoff`. The example CLIs expose the same choice
+as `--voronoi-failure-policy`, and record it in experiment and graph-cache metadata.
+Dataset graph-build errors add the CSV row index, material ID, CIF path, and neighbor
+strategy while preserving the original exception as the cause.
 
 Custom strategies can implement `build(structure) -> NeighborList` and be passed directly as `neighbor_strategy=my_strategy`. This is the intended path for new graph construction research.
 

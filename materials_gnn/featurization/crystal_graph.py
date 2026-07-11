@@ -82,8 +82,8 @@ def structure_to_bond_graph(
         neighbor_strategy: ``None``/``"cutoff"`` for fixed cutoff neighbors, one of
             ``"knn"``, ``"voronoi"``, ``"adaptive_shell"``, or a custom strategy object
             implementing ``build(structure)``.
-        neighbor_kwargs: Strategy-specific options such as ``{"k": 12}`` or
-            ``{"max_radius": 10.0}``.
+        neighbor_kwargs: Strategy-specific options such as ``{"k": 12}``,
+            ``{"max_radius": 10.0}``, or Voronoi ``{"failure_policy": "raise"}``.
         dtype: Floating-point dtype for geometric tensors.
 
     Returns:
@@ -106,7 +106,7 @@ def structure_to_bond_graph(
     strategy = make_neighbor_strategy(
         neighbor_strategy,
         cutoff=cutoff,
-        **(neighbor_kwargs or {}),
+        strategy_kwargs=neighbor_kwargs,
     )
     neighbor_list = strategy.build(structure)
     center_indices = neighbor_list.center_indices

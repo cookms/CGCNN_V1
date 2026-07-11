@@ -47,6 +47,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--neighbor-k", type=int, default=12)
     parser.add_argument("--neighbor-max-radius", type=float, default=None)
+    parser.add_argument(
+        "--voronoi-failure-policy",
+        choices=["raise", "empty", "cutoff"],
+        default="raise",
+        help="Whole-graph policy when Voronoi construction fails or any atom has no neighbors",
+    )
     parser.add_argument("--rbf-cutoff", type=float, default=None)
     parser.add_argument("--strain-epsilon", type=float, default=0.02)
     parser.add_argument("--min-survival-fraction", type=float, default=0.5)
@@ -102,7 +108,7 @@ def _neighbor_kwargs_from_args(args: argparse.Namespace) -> dict[str, object]:
             kwargs["max_radius"] = args.neighbor_max_radius
         return kwargs
     if args.neighbor_strategy == "voronoi":
-        kwargs = {}
+        kwargs = {"failure_policy": args.voronoi_failure_policy}
         if args.neighbor_max_radius is not None:
             kwargs["cutoff"] = args.neighbor_max_radius
         return kwargs

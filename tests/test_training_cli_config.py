@@ -7,6 +7,35 @@ import torch
 from examples import train_alignn_like, train_cgcnn
 
 
+def test_voronoi_failure_policy_is_recorded_in_training_configs(monkeypatch) -> None:
+    for module in (train_cgcnn, train_alignn_like):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                module.__name__,
+                "--csv",
+                "data.csv",
+                "--neighbor-strategy",
+                "voronoi",
+                "--voronoi-failure-policy",
+                "cutoff",
+            ],
+        )
+        args = module.parse_args()
+        inference_config = module._inference_config_from_args(args)
+        experiment_config = module._experiment_config_from_args(
+            args,
+            device=torch.device("cpu"),
+            split_indices=([0], [1], [2]),
+            normalizer=None,
+        )
+
+        assert inference_config["neighbor_kwargs"]["failure_policy"] == "cutoff"
+        assert experiment_config["graph"]["neighbor_kwargs"]["failure_policy"] == "cutoff"
+        assert experiment_config["training"]["cli_args"]["voronoi_failure_policy"] == "cutoff"
+
+
 def test_train_cgcnn_model_config_captures_architecture_and_research_toggles(monkeypatch) -> None:
     monkeypatch.setattr(
         sys,
