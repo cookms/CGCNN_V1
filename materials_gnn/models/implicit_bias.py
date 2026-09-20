@@ -10,6 +10,8 @@ from __future__ import annotations
 import torch
 from torch import Tensor, nn
 
+_DENSE_BIAS_MAX_PAIRWISE_ELEMENTS = 2_000_000
+
 
 def _activation_module(name: str) -> nn.Module:
     normalized = name.lower()
@@ -67,14 +69,73 @@ class ImplicitBiasActivation(nn.Module):
         self.dim = dim
         self.sigma_slope = float(sigma_slope)
         self.fixed_point_iters = fixed_point_iters
+        self.coupling_type = coupling
         self.activation = _activation_module(activation)
-        self.register_buffer("coupling", _build_coupling(dim, coupling))
+        if coupling == "ring":
+            coupling_weights = torch.empty(0, dtype=torch.float32)
+        else:
+            coupling_weights = _build_coupling(dim, coupling)
+        self.register_buffer("coupling", coupling_weights, persistent=(coupling != "ring"))
 
         lambda_tensor = torch.tensor(float(ib_lambda), dtype=torch.float32)
         if trainable_lambda:
             self.ib_lambda = nn.Parameter(lambda_tensor)
         else:
             self.register_buffer("ib_lambda", lambda_tensor)
+
+    def _ring_bias(self, z: Tensor) -> Tensor:
+        if self.dim == 1:
+            return torch.zeros_like(z)
+
+        z_left = torch.roll(z, shifts=1, dims=-1)
+        z_right = torch.roll(z, shifts=-1, dims=-1)
+        return 0.5 * (
+            torch.sigmoid(self.sigma_slope * (z_left - z))
+            + torch.sigmoid(self.sigma_slope * (z_right - z))
+        )
+
+    def _dense_bias(self, z: Tensor, coupling: Tensor) -> Tensor:
+        batch_like = z.shape[0]
+        chunk_size = max(
+            1,
+            min(
+                self.dim,
+                _DENSE_BIAS_MAX_PAIRWISE_ELEMENTS // max(batch_like * self.dim, 1),
+            ),
+        )
+        bias_chunks = []
+        for start in range(0, self.dim, chunk_size):
+            end = min(start + chunk_size, self.dim)
+            z_chunk = z[:, start:end]
+            diff = z.unsqueeze(1) - z_chunk.unsqueeze(2)
+            chunk_bias = (
+                coupling[start:end].unsqueeze(0)
+                * torch.sigmoid(self.sigma_slope * diff)
+            ).sum(dim=-1)
+            bias_chunks.append(chunk_bias)
+        return torch.cat(bias_chunks, dim=-1)
+
+    def _load_from_state_dict(
+        self,
+        state_dict: dict[str, Tensor],
+        prefix: str,
+        local_metadata: dict[str, object],
+        strict: bool,
+        missing_keys: list[str],
+        unexpected_keys: list[str],
+        error_msgs: list[str],
+    ) -> None:
+        if self.coupling_type == "ring":
+            state_dict.pop(prefix + "coupling", None)
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
 
     def forward(self, y: Tensor) -> Tensor:
         if y.shape[-1] != self.dim:
@@ -87,11 +148,19 @@ class ImplicitBiasActivation(nn.Module):
         original_shape = y.shape
         y_flat = y.reshape(-1, self.dim)
         z = y_flat
-        coupling = self.coupling.to(dtype=y.dtype, device=y.device)
+        coupling = None
+        if self.coupling_type == "dense":
+            coupling = self.coupling.to(dtype=y.dtype, device=y.device)
 
         for _ in range(self.fixed_point_iters):
-            diff = z.unsqueeze(1) - z.unsqueeze(2)
-            bias = (coupling.unsqueeze(0) * torch.sigmoid(self.sigma_slope * diff)).sum(dim=-1)
+            if self.coupling_type == "ring":
+                bias = self._ring_bias(z)
+            elif self.coupling_type == "dense":
+                if coupling is None:
+                    raise RuntimeError("dense implicit-bias coupling weights are unavailable")
+                bias = self._dense_bias(z, coupling)
+            else:
+                raise RuntimeError(f"Unsupported implicit-bias coupling: {self.coupling_type!r}")
             z = y_flat - ib_lambda * bias
 
         return self.activation(z.reshape(original_shape))

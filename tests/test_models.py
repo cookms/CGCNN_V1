@@ -376,12 +376,94 @@ def test_alignn_forward_with_model_level_distance_and_angle_bases() -> None:
     assert torch.isfinite(out).all()
 
 
-def test_implicit_bias_activation_preserves_shape_and_is_finite() -> None:
-    activation = ImplicitBiasActivation(dim=5, ib_lambda=0.01, fixed_point_iters=3)
+def _explicit_ring_implicit_bias(
+    y: torch.Tensor,
+    ib_lambda: float,
+    sigma_slope: float,
+    iters: int,
+) -> torch.Tensor:
+    dim = y.shape[-1]
+    weights = torch.zeros((dim, dim), dtype=y.dtype, device=y.device)
+    if dim > 1:
+        for idx in range(dim):
+            weights[idx, (idx - 1) % dim] = 1.0
+            weights[idx, (idx + 1) % dim] = 1.0
+        weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1.0)
+
+    original_shape = y.shape
+    y_flat = y.reshape(-1, dim)
+    z = y_flat
+    for _ in range(iters):
+        diff = z.unsqueeze(1) - z.unsqueeze(2)
+        bias = (weights.unsqueeze(0) * torch.sigmoid(sigma_slope * diff)).sum(dim=-1)
+        z = y_flat - ib_lambda * bias
+    return torch.nn.functional.silu(z.reshape(original_shape))
+
+
+def test_implicit_bias_activation_ring_preserves_shape_and_is_finite() -> None:
+    activation = ImplicitBiasActivation(
+        dim=5,
+        ib_lambda=0.01,
+        fixed_point_iters=3,
+        coupling="ring",
+    )
     y = torch.randn(2, 3, 5)
 
     out = activation(y)
 
+    assert out.shape == y.shape
+    assert torch.isfinite(out).all()
+
+
+def test_implicit_bias_activation_ring_matches_explicit_reference() -> None:
+    activation = ImplicitBiasActivation(
+        dim=5,
+        ib_lambda=0.03,
+        sigma_slope=1.25,
+        fixed_point_iters=3,
+        coupling="ring",
+    )
+    y = torch.randn(2, 3, 5)
+
+    out = activation(y)
+    reference = _explicit_ring_implicit_bias(y, ib_lambda=0.03, sigma_slope=1.25, iters=3)
+
+    assert torch.allclose(out, reference, atol=1e-7, rtol=1e-7)
+
+
+def test_implicit_bias_activation_ring_gradients_flow() -> None:
+    activation = ImplicitBiasActivation(
+        dim=4,
+        ib_lambda=0.01,
+        fixed_point_iters=3,
+        coupling="ring",
+        trainable_lambda=True,
+    )
+    y = torch.randn(2, 4, requires_grad=True)
+
+    loss = activation(y).sum()
+    loss.backward()
+
+    assert y.grad is not None
+    assert torch.isfinite(y.grad).all()
+    assert y.grad.detach().abs().sum() > 0
+    assert activation.ib_lambda.grad is not None
+    assert torch.isfinite(activation.ib_lambda.grad).all()
+
+
+def test_implicit_bias_activation_ring_handles_large_edge_batch() -> None:
+    activation = ImplicitBiasActivation(
+        dim=128,
+        ib_lambda=0.01,
+        fixed_point_iters=2,
+        coupling="ring",
+    )
+    y = torch.randn(20_000, 128)
+
+    with torch.no_grad():
+        out = activation(y)
+
+    assert activation.coupling.numel() == 0
     assert out.shape == y.shape
     assert torch.isfinite(out).all()
 
