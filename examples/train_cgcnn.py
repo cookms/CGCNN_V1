@@ -14,7 +14,7 @@ import materials_gnn
 from materials_gnn.data.datasets import CrystalGraphDataset, collate_graphs
 from materials_gnn.data.splits import split_dataset
 from materials_gnn.evaluation import export_predictions_csv
-from materials_gnn.models import CGCNNModel
+from materials_gnn.models import CGCNNModel, ResNeXtCGCNNModel, model_parameter_summary
 from materials_gnn.training import dataloader_device_kwargs, evaluate_model, resolve_device, train_model
 from materials_gnn.utils import write_experiment_config
 
@@ -80,6 +80,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--conv-ib-targets", type=str, default="")
     parser.add_argument("--hidden-dim", type=int, default=128)
     parser.add_argument("--num-layers", type=int, default=3)
+    parser.add_argument("--model", choices=["cgcnn", "resnext_cgcnn"], default="cgcnn")
+    parser.add_argument("--cardinality", type=int, default=4)
+    parser.add_argument("--branch-dim", type=int, default=None, help="Internal width per branch; defaults to hidden-dim")
+    parser.add_argument("--aggregation", choices=["sum", "mean"], default="mean")
+    parser.add_argument("--branch-weighting", choices=["uniform", "learned"], default="uniform")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -95,8 +100,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--graph-cache-dir", default=None, help="Directory for persistent precomputed graph cache")
     parser.add_argument("--overwrite-graph-cache", action="store_true", help="Rebuild graphs even if cached entries exist")
     parser.add_argument("--matmul-precision", default=None, choices=["highest", "high", "medium"], help="Optional torch float32 matmul precision")
-    parser.add_argument("--output-dir", default="runs/cgcnn")
-    return parser.parse_args()
+    parser.add_argument("--output-dir", default=None)
+    args = parser.parse_args()
+    if args.output_dir is None:
+        args.output_dir = (
+            "runs/cgcnn" if args.model == "cgcnn" else
+            f"runs/resnext_cgcnn_C{args.cardinality}_B{args.branch_dim or args.hidden_dim}_"
+            f"{args.aggregation}_{args.branch_weighting}"
+        )
+    return args
 
 
 def _neighbor_kwargs_from_args(args: argparse.Namespace) -> dict[str, object]:
@@ -145,7 +157,7 @@ def _graph_kwargs_from_args(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _model_config_from_args(args: argparse.Namespace) -> dict[str, Any]:
-    return {
+    config = {
         "edge_input_dim": args.num_rbf,
         "hidden_dim": args.hidden_dim,
         "num_layers": args.num_layers,
@@ -167,6 +179,14 @@ def _model_config_from_args(args: argparse.Namespace) -> dict[str, Any]:
         "conv_ib_trainable_lambda": args.conv_ib_trainable_lambda,
         "conv_ib_targets": _parse_csv_targets(args.conv_ib_targets),
     }
+    if args.model == "resnext_cgcnn":
+        config.update(
+            cardinality=args.cardinality,
+            branch_dim=args.branch_dim,
+            aggregation=args.aggregation,
+            branch_weighting=args.branch_weighting,
+        )
+    return config
 
 
 def _inference_config_from_args(args: argparse.Namespace) -> dict[str, Any]:
@@ -187,6 +207,7 @@ def _experiment_config_from_args(
     device: torch.device,
     split_indices: tuple[list[int], list[int], list[int]],
     normalizer: Any,
+    parameter_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     train_idx, val_idx, test_idx = split_indices
     return {
@@ -197,9 +218,10 @@ def _experiment_config_from_args(
         },
         "script": "examples/train_cgcnn.py",
         "model": {
-            "name": "cgcnn",
-            "architecture": "CGCNNModel",
+            "name": args.model,
+            "architecture": "ResNeXtCGCNNModel" if args.model == "resnext_cgcnn" else "CGCNNModel",
             "config": _model_config_from_args(args),
+            "parameter_summary": parameter_summary,
         },
         "data": {
             "csv": args.csv,
@@ -315,12 +337,16 @@ def main() -> None:
         **loader_kwargs,
     )
 
-    model = CGCNNModel(**_model_config_from_args(args))
+    model_class = ResNeXtCGCNNModel if args.model == "resnext_cgcnn" else CGCNNModel
+    model = model_class(**_model_config_from_args(args))
+    summary = model_parameter_summary(model)
+    print(f"model parameter summary: {summary}")
     experiment_config = _experiment_config_from_args(
         args,
         device=device,
         split_indices=split_indices,
         normalizer=normalizer,
+        parameter_summary=summary,
     )
     write_experiment_config(experiment_config, output_dir / "experiment_config.json")
     checkpoint_metadata = _checkpoint_metadata_from_experiment_config(experiment_config)

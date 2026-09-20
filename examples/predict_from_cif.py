@@ -16,7 +16,7 @@ import torch
 
 from materials_gnn.data.transforms import TargetNormalizer
 from materials_gnn.inference import predict_cif
-from materials_gnn.models import ALIGNNLikeModel, CGCNNModel
+from materials_gnn.models import ALIGNNLikeModel, CGCNNModel, ResNeXtCGCNNModel
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use CLI model/graph arguments instead of metadata saved in the checkpoint",
     )
-    parser.add_argument("--model", choices=["cgcnn", "alignn_like"], default="alignn_like")
+    parser.add_argument("--model", choices=["cgcnn", "resnext_cgcnn", "alignn_like"], default="alignn_like")
     parser.add_argument("--cutoff", type=float, default=5.0)
     parser.add_argument(
         "--neighbor-strategy",
@@ -79,6 +79,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--hidden-dim", type=int, default=128)
     parser.add_argument("--num-layers", type=int, default=3)
+    parser.add_argument("--cardinality", type=int, default=4)
+    parser.add_argument("--branch-dim", type=int, default=None)
+    parser.add_argument("--aggregation", choices=["sum", "mean"], default="mean")
+    parser.add_argument("--branch-weighting", choices=["uniform", "learned"], default="uniform")
     parser.add_argument("--readout-type", choices=["mlp", "implicit_bias"], default="mlp")
     parser.add_argument("--ib-lambda", type=float, default=0.01)
     parser.add_argument("--ib-sigma-slope", type=float, default=1.0)
@@ -143,7 +147,7 @@ def _legacy_settings_from_args(args: argparse.Namespace) -> tuple[str, dict[str,
         "line_graph_kwargs": None,
     }
 
-    if args.model == "cgcnn":
+    if args.model in {"cgcnn", "resnext_cgcnn"}:
         model_config = {
             "edge_input_dim": args.num_rbf,
             "hidden_dim": args.hidden_dim,
@@ -159,6 +163,13 @@ def _legacy_settings_from_args(args: argparse.Namespace) -> tuple[str, dict[str,
             "ib_coupling": args.ib_coupling,
             "ib_trainable_lambda": args.ib_trainable_lambda,
         }
+        if args.model == "resnext_cgcnn":
+            model_config.update(
+                cardinality=args.cardinality,
+                branch_dim=args.branch_dim,
+                aggregation=args.aggregation,
+                branch_weighting=args.branch_weighting,
+            )
     else:
         inference_config["line_graph_kwargs"] = {
             "num_angle_rbf": args.num_angle_rbf,
@@ -207,6 +218,8 @@ def _settings_from_checkpoint_or_args(
 def _build_model(model_name: str, model_config: dict[str, Any]) -> torch.nn.Module:
     if model_name == "cgcnn":
         return CGCNNModel(**model_config)
+    if model_name == "resnext_cgcnn":
+        return ResNeXtCGCNNModel(**model_config)
     if model_name == "alignn_like":
         return ALIGNNLikeModel(**model_config)
     raise ValueError(f"Unsupported checkpoint model_name {model_name!r}")

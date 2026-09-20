@@ -425,6 +425,74 @@ python examples/train_cgcnn.py \
 For CGCNN-style runs, the same `--use-edge-weight` flag enables weighted atom-graph
 aggregation when the graph contains `edge_weight`.
 
+## ResNeXt-CGCNN cardinality experiment
+
+`--model resnext_cgcnn` replaces each CGCNN message-passing block with independent
+`GatedGraphConv` branches over the **same** atom and bond graph. Cardinality (`C`)
+is the number of branches; `hidden_dim` is the full atom/bond representation size;
+`branch_dim` is each branch's internal MLP width. It defaults to `hidden_dim`.
+Each branch updates both atom and bond states. The block aggregates the branch changes
+relative to the common input and adds the result to that input:
+
+```text
+                     +-- GatedGraphConv branch 1 --+
+atom and bond state --+-- GatedGraphConv branch 2 --+-- aggregate changes -- + --> next block
+                     +-- ... branch C ------------+                        |
+atom and bond state ---------------------------------------------------------+
+```
+
+For node states, `h_i^(l+1) = h_i^l + A_c F_c(h_i^l, N_i)`, with the analogous
+update for bond states. `A` is `sum` or `mean` (`mean` by default). Branches
+retain the baseline's layer normalization and hidden activation. Uniform weighting
+is the default; `--branch-weighting learned` uses softmax-normalized global branch
+weights. At `C=1, branch_dim=hidden_dim`, the block calls the original
+`GatedGraphConv` directly and matches its behavior and parameter count.
+
+```bash
+python examples/train_cgcnn.py --csv id_prop.csv --model cgcnn --output-dir runs/cgcnn
+python examples/train_cgcnn.py --csv id_prop.csv --model resnext_cgcnn --cardinality 1 --branch-dim 128 --output-dir runs/resnext_c1
+python examples/train_cgcnn.py --csv id_prop.csv --model resnext_cgcnn --cardinality 4 --branch-dim 32 --aggregation mean --output-dir runs/resnext_c4_b32
+python examples/train_cgcnn.py --csv id_prop.csv --model resnext_cgcnn --cardinality 4 --branch-dim 128 --aggregation mean --output-dir runs/resnext_c4_b128
+```
+
+The first table keeps `C * branch_dim = 128`. Counts assume the default 64 bond
+basis features, three graph blocks, one scalar output, and no extra atom descriptors
+or implicit-bias parameters. `branch_dim` controls MLP bottlenecks, while each
+branch still has a full 128-wide gate and layer norms. Thus equal total bottleneck
+width does **not** mean equal parameters.
+
+| Model | C | Branch width | Trainable parameters |
+| --- | ---: | ---: | ---: |
+| CGCNN | 1 | 128 | 585,089 |
+| ResNeXt-CGCNN | 1 | 128 | 585,089 |
+| ResNeXt-CGCNN | 2 | 64 | 637,313 |
+| ResNeXt-CGCNN | 4 | 32 | 741,761 |
+| ResNeXt-CGCNN | 8 | 16 | 950,657 |
+
+With fixed branch width 128, counts rise faster:
+
+| C | Branch width | Trainable parameters |
+| ---: | ---: | ---: |
+| 1 | 128 | 585,089 |
+| 2 | 128 | 1,129,985 |
+| 4 | 128 | 2,219,777 |
+| 8 | 128 | 4,399,361 |
+
+For a **closer parameter-matched** comparison, use branch widths `128, 57, 22, 4`
+for `C=1, 2, 4, 8`. Their respective counts are `585,089, 583,427, 587,801,
+581,153`. Check the printed model parameter summary for nondefault settings;
+the same summary is stored in `experiment_config.json`. Run every configuration
+with the same graph cache, split seed, target, optimizer and training settings.
+Checkpoint metadata records the model name and architecture arguments, so
+`examples/predict_from_cif.py` reconstructs ResNeXt runs automatically.
+Without `--output-dir`, ResNeXt runs use a directory named from cardinality,
+branch width, aggregation and weighting; baseline CGCNN still uses `runs/cgcnn`.
+
+`sum` aggregation grows the update scale with C; `mean` starts at a comparable
+scale. Branch activations and parameters still consume extra memory as cardinality
+grows, and repeated graph passes reduce throughput. Inspect validation curves for
+oversmoothing and learned weights for redundant or collapsed branches.
+
 ## Implicit-bias readout experiment
 
 The first implicit-bias experiment leaves graph construction and message passing unchanged
