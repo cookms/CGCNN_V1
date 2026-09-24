@@ -12,7 +12,13 @@ from torch import Tensor, nn
 from torch.utils.data import DataLoader
 
 from materials_gnn.data.transforms import TargetNormalizer
-from materials_gnn.training.device import describe_device, move_to_device, resolve_device, set_float32_matmul_precision
+from materials_gnn.training.device import (
+    describe_device,
+    move_to_device,
+    resolve_device,
+    set_float32_matmul_precision,
+)
+from materials_gnn.training.early_stopping import EarlyStopping
 from materials_gnn.training.metrics import mae, r2_score, rmse
 
 
@@ -292,6 +298,7 @@ def _make_checkpoint_payload(
     val_mae: float | None = None,
     checkpoint_metadata: Mapping[str, Any] | None = None,
     history: list[dict[str, Any]] | None = None,
+    early_stopping_state: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a checkpoint dictionary with enough metadata for inference scripts.
 
@@ -313,7 +320,20 @@ def _make_checkpoint_payload(
         payload["metadata"] = dict(checkpoint_metadata)
     if history is not None:
         payload["history"] = history
+    if early_stopping_state is not None:
+        state = dict(early_stopping_state)
+        payload["early_stopping"] = state
+        payload["best_epoch"] = state.get("best_validation_epoch")
+        payload["best_validation_metric"] = state.get("best_validation_metric")
+        payload["early_stopping_monitor"] = state.get("monitor")
+        payload["early_stopping_mode"] = state.get("mode")
     return payload
+
+
+def _cpu_state_dict(model: nn.Module) -> dict[str, Tensor]:
+    """Copy model parameters and buffers to CPU for an in-memory best checkpoint."""
+
+    return {name: value.detach().cpu().clone() for name, value in model.state_dict().items()}
 
 
 def train_model(
@@ -330,6 +350,7 @@ def train_model(
     checkpoint_path: str | Path | None = None,
     final_checkpoint_path: str | Path | None = None,
     checkpoint_metadata: Mapping[str, Any] | None = None,
+    early_stopping: EarlyStopping | None = None,
     grad_clip_norm: float | None = 5.0,
     mixed_precision: bool = False,
     non_blocking: bool = True,
@@ -345,11 +366,16 @@ def train_model(
     CUDA when available and otherwise falls back to CPU. Mixed precision is enabled only
     on CUDA because CPU autocast is less relevant for this prototype. When provided,
     ``checkpoint_metadata`` is copied into both best and final checkpoints so inference
-    can reconstruct the original model and graph settings.
+    can reconstruct the original model and graph settings. When ``early_stopping``
+    is supplied, its monitor must name a validation history field such as
+    ``val_mae``. The strict raw-metric best model is restored before returning;
+    smoothing affects only the plateau decision.
     """
 
     if epochs <= 0:
         raise ValueError("epochs must be positive")
+    if early_stopping is not None and val_loader is None:
+        raise ValueError("early stopping requires a validation loader")
 
     resolved_device = resolve_device(device)
     set_float32_matmul_precision(matmul_precision)
@@ -359,6 +385,8 @@ def train_model(
     scaler = _make_grad_scaler(_amp_enabled(resolved_device, mixed_precision))
     history: list[dict[str, Any]] = []
     best_val_mae = float("inf")
+    best_model_state: dict[str, Tensor] | None = None
+    stopped_early = False
     train_samples = _loader_num_samples(train_loader)
     train_batches = _safe_len(train_loader)
     training_start = time.perf_counter()
@@ -417,7 +445,32 @@ def train_model(
             record["epoch_seconds"] = time.perf_counter() - epoch_start
             record["elapsed_seconds"] = time.perf_counter() - training_start
 
-            if val_metrics["mae"] < best_val_mae:
+            if early_stopping is not None:
+                if early_stopping.monitor not in record:
+                    available = sorted(key for key in record if key.startswith("val_"))
+                    raise ValueError(
+                        f"Unknown early-stopping monitor {early_stopping.monitor!r}; "
+                        f"available validation fields: {available}"
+                    )
+                early_stopping.step(float(record[early_stopping.monitor]), epoch)
+                record.update(early_stopping.history_fields())
+                if early_stopping.raw_improved:
+                    best_model_state = _cpu_state_dict(model)
+                    if checkpoint_path is not None:
+                        Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+                        torch.save(
+                            _make_checkpoint_payload(
+                                model,
+                                epoch=epoch,
+                                target_normalizer=target_normalizer,
+                                val_mae=float(record["val_mae"]),
+                                checkpoint_metadata=checkpoint_metadata,
+                                history=history + [record],
+                                early_stopping_state=early_stopping.state_dict(),
+                            ),
+                            checkpoint_path,
+                        )
+            elif val_metrics["mae"] < best_val_mae:
                 best_val_mae = float(val_metrics["mae"])
                 if checkpoint_path is not None:
                     Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
@@ -451,6 +504,10 @@ def train_model(
                 msg += f" train_samples/s={record['train_samples_per_second']:.2f}"
             print(msg)
 
+        if early_stopping is not None and early_stopping.should_stop:
+            stopped_early = True
+            break
+
     if final_checkpoint_path is not None:
         Path(final_checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
         torch.save(
@@ -460,8 +517,50 @@ def train_model(
                 target_normalizer=target_normalizer,
                 checkpoint_metadata=checkpoint_metadata,
                 history=history,
+                early_stopping_state=(
+                    early_stopping.state_dict() if early_stopping is not None else None
+                ),
             ),
             final_checkpoint_path,
         )
+
+    if early_stopping is not None and best_model_state is not None:
+        model.load_state_dict(best_model_state)
+        if checkpoint_path is not None:
+            best_epoch = early_stopping.best_raw_epoch
+            best_record = history[best_epoch - 1] if best_epoch is not None else None
+            Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+            torch.save(
+                _make_checkpoint_payload(
+                    model,
+                    epoch=best_epoch or 0,
+                    target_normalizer=target_normalizer,
+                    val_mae=(
+                        float(best_record["val_mae"])
+                        if best_record is not None
+                        else None
+                    ),
+                    checkpoint_metadata=checkpoint_metadata,
+                    history=history,
+                    early_stopping_state=early_stopping.state_dict(),
+                ),
+                checkpoint_path,
+            )
+
+    if verbose and early_stopping is not None and early_stopping.best_raw_metric is not None:
+        if stopped_early:
+            print(f"Early stopping at epoch {history[-1]['epoch']}.")
+        else:
+            print(f"Training reached the maximum of {epochs} epochs.")
+        print(
+            f"Best {early_stopping.monitor} = {early_stopping.best_raw_metric:.5f} "
+            f"at epoch {early_stopping.best_raw_epoch}."
+        )
+        if stopped_early:
+            print(
+                "No meaningful improvement for "
+                f"{early_stopping.epochs_since_improvement} epochs "
+                f"(patience={early_stopping.current_patience})."
+            )
 
     return history

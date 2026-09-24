@@ -216,3 +216,34 @@ def test_checkpoint_metadata_preserves_full_experiment_configs(monkeypatch) -> N
     assert metadata["experiment_config"] == experiment_config
     assert metadata["model_config"]["use_edge_weight"] is True
     assert metadata["model_config"]["readout_type"] == "implicit_bias"
+
+
+def test_training_scripts_share_early_stopping_cli(monkeypatch) -> None:
+    for module in (train_cgcnn, train_alignn_like):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                module.__name__,
+                "--csv",
+                "data.csv",
+                "--early-stopping",
+                "--early-stopping-monitor",
+                "val_r2",
+                "--early-stopping-patience",
+                "7",
+                "--early-stopping-adaptive",
+                "--early-stopping-max-patience",
+                "20",
+                "--early-stopping-smoothing",
+                "3",
+            ],
+        )
+        args = module.parse_args()
+
+        assert args.early_stopping is True
+        assert args.early_stopping_monitor == "val_r2"
+        assert args.early_stopping_patience == 7
+        assert args.early_stopping_adaptive is True
+        assert args.early_stopping_max_patience == 20
+        assert args.early_stopping_smoothing == 3

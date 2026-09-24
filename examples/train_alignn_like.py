@@ -19,7 +19,14 @@ from materials_gnn.data.datasets import CrystalGraphDataset, collate_graphs
 from materials_gnn.data.splits import split_dataset
 from materials_gnn.evaluation import export_predictions_csv
 from materials_gnn.models import ALIGNNLikeModel
-from materials_gnn.training import dataloader_device_kwargs, evaluate_model, resolve_device, train_model
+from materials_gnn.training import (
+    add_early_stopping_arguments,
+    dataloader_device_kwargs,
+    early_stopping_from_args,
+    evaluate_model,
+    resolve_device,
+    train_model,
+)
 from materials_gnn.utils import write_experiment_config
 
 
@@ -109,6 +116,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-layers", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=50)
+    add_early_stopping_arguments(parser)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--grad-clip-norm", type=float, default=5.0, help="Max gradient norm; set <=0 to disable clipping")
     parser.add_argument("--no-finite-checks", action="store_true", help="Disable NaN/Inf checks in batches, predictions, losses, gradients, and parameters")
@@ -389,6 +397,7 @@ def main() -> None:
         checkpoint_path=output_dir / "best_model.pt",
         final_checkpoint_path=output_dir / "final_model.pt",
         checkpoint_metadata=checkpoint_metadata,
+        early_stopping=early_stopping_from_args(args),
         check_finite=not args.no_finite_checks,
         detect_anomaly=args.detect_anomaly,
     )

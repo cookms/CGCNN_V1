@@ -425,6 +425,64 @@ python examples/train_cgcnn.py \
 For CGCNN-style runs, the same `--use-edge-weight` flag enables weighted atom-graph
 aggregation when the graph contains `edge_weight`.
 
+## Adaptive early stopping
+
+Early stopping is opt-in in both training scripts; without `--early-stopping`, runs
+still execute exactly `--epochs` epochs. Validation MAE is monitored by default and
+`--epochs` always remains the hard maximum. A fixed-patience baseline CGCNN run is:
+
+```bash
+python examples/train_cgcnn.py \
+  --csv data/id_prop.csv \
+  --target target \
+  --epochs 500 \
+  --early-stopping \
+  --early-stopping-patience 25 \
+  --early-stopping-warmup 30 \
+  --early-stopping-min-delta 1e-4
+```
+
+Adaptive patience grows deterministically to `ceil(factor * epoch)` when a meaningful
+new best is observed, while never shrinking below the initial patience or exceeding
+the configured cap:
+
+```bash
+python examples/train_cgcnn.py \
+  --csv data/id_prop.csv \
+  --target target \
+  --epochs 500 \
+  --early-stopping \
+  --early-stopping-adaptive \
+  --early-stopping-patience 20 \
+  --early-stopping-max-patience 60 \
+  --early-stopping-factor 0.25 \
+  --early-stopping-smoothing 5
+```
+
+The identical options and semantics apply to ALIGNN-like models:
+
+```bash
+python examples/train_alignn_like.py \
+  --csv data/id_prop.csv \
+  --target target \
+  --epochs 500 \
+  --early-stopping \
+  --early-stopping-adaptive \
+  --early-stopping-patience 20 \
+  --early-stopping-warmup 30 \
+  --early-stopping-max-patience 60 \
+  --early-stopping-factor 0.25 \
+  --early-stopping-smoothing 5
+```
+
+`--early-stopping-smoothing N` uses the rolling mean of the latest `N` monitor
+values only for the plateau decision. Raw validation metrics continue to be logged,
+and `best_model.pt` always contains the strict best raw monitored metric. The best
+weights are restored before test evaluation; `final_model.pt` retains the last
+trained epoch for inspection. Common metric directions are inferred (`val_mae` and
+`val_rmse` are minimized, `val_r2` is maximized), or can be specified with
+`--early-stopping-mode min|max` for a custom monitor.
+
 ## ResNeXt-CGCNN cardinality experiment
 
 `--model resnext_cgcnn` replaces each CGCNN message-passing block with independent
